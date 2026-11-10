@@ -75,6 +75,7 @@ struct SavedMonitor: Codable {
     var yaw: Double
     var pitch: Double
     var scale: Double?
+    var shape: Int?
 }
 
 /// 空間の見た目（テーマ）
@@ -224,7 +225,18 @@ final class PassthroughView: UIView {
 // MARK: - モニター（ブラウザ1枚）
 
 final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextFieldDelegate {
-    static let spaceSize = CGSize(width: 720, height: 540)
+    /// 選べる形（空間内での幅と高さ）
+    static let shapes: [(name: String, size: CGSize)] = [
+        (name: "標準", size: CGSize(width: 720, height: 540)),
+        (name: "横長", size: CGSize(width: 960, height: 540)),
+        (name: "縦長", size: CGSize(width: 480, height: 800)),
+        (name: "正方形", size: CGSize(width: 640, height: 640))
+    ]
+    var shape = 0
+    var spaceSize: CGSize { MonitorView.shapes[shape % MonitorView.shapes.count].size }
+    var shapeName: String { MonitorView.shapes[shape % MonitorView.shapes.count].name }
+    var onShape: (() -> Void)?
+    private var shapeButton: UIButton?
     static let distance: Double = 1100
 
     var yaw: Double
@@ -252,7 +264,7 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
         self.web = WKWebView(frame: .zero, configuration: config)
-        super.init(frame: CGRect(origin: .zero, size: MonitorView.spaceSize))
+        super.init(frame: CGRect(origin: .zero, size: MonitorView.shapes[0].size))
 
         backgroundColor = Palette.panel
         layer.cornerRadius = 14
@@ -294,6 +306,9 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
         let maximize = makeButton(symbol: "arrow.up.left.and.arrow.down.right", title: nil, action: #selector(maximizeTapped))
         bar.addArrangedSubview(maximize)
         maximizeButton = maximize
+        let shapeB = makeButton(symbol: "aspectratio", title: nil, action: #selector(shapeTapped))
+        bar.addArrangedSubview(shapeB)
+        shapeButton = shapeB
         let close = makeButton(symbol: nil, title: "空間に戻す", action: #selector(closeTapped))
         let delete = makeButton(symbol: nil, title: "削除", action: #selector(deleteTapped))
         barButtons.removeAll { $0 === delete }
@@ -348,6 +363,7 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
     func setPresentation(_ p: MonitorPresentation) {
         isUserInteractionEnabled = p != .spaceLocked
         maximizeButton?.isHidden = p != .spaceLive
+        shapeButton?.isHidden = p != .spaceLive
         closeButton?.isHidden = p != .maximized
         deleteButton?.isHidden = p != .maximized
         if p == .spaceLocked { endEditing(true) }
@@ -377,6 +393,7 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
     @objc private func reload() { web.reload() }
     @objc private func closeTapped() { onClose?() }
     @objc private func maximizeTapped() { onMaximize?() }
+    @objc private func shapeTapped() { onShape?() }
     @objc private func deleteTapped() { onDelete?() }
 
     func textFieldShouldReturn(_ textField: UITextField) -> Bool {
@@ -555,6 +572,7 @@ final class SpaceViewController: UIViewController {
         row2.spacing = 10
         row2.addArrangedSubview(makeHUDButton("拡大", primary: false, action: #selector(enlargeGazed)))
         row2.addArrangedSubview(makeHUDButton("縮小", primary: false, action: #selector(shrinkGazed)))
+        row2.addArrangedSubview(makeHUDButton("形を変える", primary: false, action: #selector(changeGazedShape)))
         row2.addArrangedSubview(makeHUDButton("視点リセット", primary: false, action: #selector(recenter)))
         row2.addArrangedSubview(makeHUDButton("配置リセット", primary: false, action: #selector(resetLayout)))
 
@@ -755,6 +773,25 @@ final class SpaceViewController: UIViewController {
     private func setScale(_ mv: MonitorView, _ value: Double) {
         mv.scale = min(2.0, max(0.5, value))
         mv.place()
+    }
+
+    /// モニターの形を次のものに変える（標準 → 横長 → 縦長 → 正方形）
+    private func cycleShape(_ mv: MonitorView) {
+        mv.shape = (mv.shape + 1) % MonitorView.shapes.count
+        if mv !== focused {
+            mv.bounds = CGRect(origin: .zero, size: mv.spaceSize)
+            mv.place()
+        }
+        saveMonitors()
+        showToast("モニターの形：" + mv.shapeName)
+    }
+
+    @objc private func changeGazedShape() {
+        guard let mv = gazed else {
+            showToast("形を変えたいモニターに、中央の照準を合わせてください。")
+            return
+        }
+        cycleShape(mv)
     }
 
     @objc private func enlargeGazed() { stepScale(1.2) }
@@ -968,11 +1005,10 @@ final class SpaceViewController: UIViewController {
     private func monitor(alongRay d: Vec3) -> MonitorView? {
         var best: MonitorView?
         var bestT = Double.greatestFiniteMagnitude
-        let baseW = Double(MonitorView.spaceSize.width) / 2
-        let baseH = Double(MonitorView.spaceSize.height) / 2
         for mv in monitors where mv !== focused {
             let a = mv.yaw, b = mv.pitch
-            let halfW = baseW * mv.scale, halfH = baseH * mv.scale
+            let halfW = Double(mv.spaceSize.width) / 2 * mv.scale
+            let halfH = Double(mv.spaceSize.height) / 2 * mv.scale
             let n = direction(yaw: a, pitch: b)
             let k = d.dot(n)
             if k < 0.02 { continue }
@@ -1007,8 +1043,8 @@ final class SpaceViewController: UIViewController {
         let right = Vec3(cos(a), 0, -sin(a))
         let down = Vec3(sin(b) * sin(a), cos(b), sin(b) * cos(a))
         let center = n * MonitorView.distance
-        let hw = Double(MonitorView.spaceSize.width) / 2 * mv.scale
-        let hh = Double(MonitorView.spaceSize.height) / 2 * mv.scale
+        let hw = Double(mv.spaceSize.width) / 2 * mv.scale
+        let hh = Double(mv.spaceSize.height) / 2 * mv.scale
         let signs: [(Double, Double)] = [(-1, -1), (1, -1), (1, 1), (-1, 1)]
         let pts = signs.map { s in
             viewMatrix.apply(center + right * (s.0 * hw) + down * (s.1 * hh) - camPos)
@@ -1223,7 +1259,7 @@ final class SpaceViewController: UIViewController {
 
     private func attachToWorld(_ mv: MonitorView) {
         mv.layer.transform = CATransform3DIdentity
-        mv.bounds = CGRect(origin: .zero, size: MonitorView.spaceSize)
+        mv.bounds = CGRect(origin: .zero, size: mv.spaceSize)
         mv.center = CGPoint(x: view.bounds.midX, y: view.bounds.midY)
         worldView.addSubview(mv)
         mv.place()
@@ -1235,6 +1271,10 @@ final class SpaceViewController: UIViewController {
         let mv = MonitorView(url: url, yaw: yaw, pitch: pitch)
         mv.applyTheme()
         mv.onClose = { [weak self] in self?.unfocus() }
+        mv.onShape = { [weak self, weak mv] in
+            guard let self = self, let mv = mv else { return }
+            self.cycleShape(mv)
+        }
         mv.onMaximize = { [weak self, weak mv] in
             guard let self = self, let mv = mv, self.focused == nil else { return }
             self.focus(mv)
@@ -1313,22 +1353,24 @@ final class SpaceViewController: UIViewController {
         if saved.isEmpty {
             let deg = Double.pi / 180
             saved = [
-                SavedMonitor(url: "https://www.youtube.com/", yaw: 0, pitch: 0, scale: 1),
-                SavedMonitor(url: "https://ja.wikipedia.org/", yaw: -42 * deg, pitch: 0, scale: 1),
-                SavedMonitor(url: "https://www.google.com/", yaw: 42 * deg, pitch: 0, scale: 1)
+                SavedMonitor(url: "https://www.youtube.com/", yaw: 0, pitch: 0, scale: 1, shape: 0),
+                SavedMonitor(url: "https://ja.wikipedia.org/", yaw: -42 * deg, pitch: 0, scale: 1, shape: 0),
+                SavedMonitor(url: "https://www.google.com/", yaw: 42 * deg, pitch: 0, scale: 1, shape: 0)
             ]
         }
         for s in saved.prefix(maxMonitors) {
             if let url = URL(string: s.url) {
                 let mv = makeMonitor(url: url, yaw: s.yaw, pitch: s.pitch)
                 mv.scale = min(2.0, max(0.5, s.scale ?? 1))
+                mv.shape = min(MonitorView.shapes.count - 1, max(0, s.shape ?? 0))
+                mv.bounds = CGRect(origin: .zero, size: mv.spaceSize)
                 mv.place()
             }
         }
     }
 
     private func saveMonitors() {
-        let list = monitors.map { SavedMonitor(url: $0.currentURLString, yaw: $0.yaw, pitch: $0.pitch, scale: $0.scale) }
+        let list = monitors.map { SavedMonitor(url: $0.currentURLString, yaw: $0.yaw, pitch: $0.pitch, scale: $0.scale, shape: $0.shape) }
         if let data = try? JSONEncoder().encode(list) {
             UserDefaults.standard.set(data, forKey: saveKey)
         }
