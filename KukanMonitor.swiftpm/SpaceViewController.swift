@@ -26,6 +26,9 @@ final class SpaceViewController: UIViewController {
     private let toastLabel = UILabel()
     private let radar = RadarView(frame: CGRect(x: 0, y: 0, width: 108, height: 108))
     private var launcher: LauncherView?
+    private let inputPanel = InputPanel(frame: .zero)
+    private weak var inputMonitor: MonitorView?   // アプリ内キーボードの入力先
+    private var inputIsURL = false
 
     // メニュー
     private let menuButton = UIButton(type: .system)
@@ -80,13 +83,17 @@ final class SpaceViewController: UIViewController {
     private let walkLimit = 850.0            // 中心から動ける距離
 
     // 設定
-    private var directTouch = false          // true: 空間内のモニターをそのままタッチ操作する
+    private var touchMode = 0                // 0: 最大化して操作, 1: 空間で直接（照準の1枚）, 2: 空間で直接（すべて）
+    private var directTouch: Bool { touchMode != 0 }
+    private var touchOne: Bool { touchMode == 1 }
+    private var touchAll: Bool { touchMode == 2 }
     private var audioFocus = false           // true: 見ているモニターだけ音を出す
     private var arrangement = 0
     private let arrangementNames = ["アーチ", "ウォール", "シアター", "コックピット"]
     private let saveKey = "kukan.monitors.v1"
     private let themeKey = "kukan.theme.v1"
     private let touchKey = "kukan.directtouch.v1"
+    private let touchModeKey = "kukan.touchmode.v2"
     private let audioKey = "kukan.audiofocus.v1"
     private let radarKey = "kukan.radarhidden.v1"
 
@@ -96,10 +103,22 @@ final class SpaceViewController: UIViewController {
     private var arOn = false
     private var toastToken = 0
     private var keyboardVisible = false
+    private var keyboardTop: CGFloat?        // システムのキーボードの上端（出ていなければ nil）
+    private var keyboardNote = "通知なし"
+    private var webKeyboardFailed = false    // ページ内の入力欄でキーボードが出なかった
+    private var urlKeyboardFailed = false    // URL欄でキーボードが出なかった
+    private var focusToken = 0
 
     /// 拡大縮小・形の変更・移動の対象。照準が乗っているモニター（直接操作の設定では、なければ操作中のモニター）。
     private var currentTarget: MonitorView? {
-        gazed ?? (directTouch ? active : nil)
+        gazed ?? (touchOne ? active : nil)
+    }
+
+    /// 空間に置かれているモニターが、いまの設定でタッチに反応するか
+    private func spacePresentation(for mv: MonitorView) -> MonitorPresentation {
+        if touchAll { return .spaceLive }
+        if touchOne && active === mv { return .spaceLive }
+        return .spaceLocked
     }
 
     override var prefersStatusBarHidden: Bool { true }
@@ -111,7 +130,12 @@ final class SpaceViewController: UIViewController {
         super.viewDidLoad()
         let defaults = UserDefaults.standard
         Palette.index = defaults.integer(forKey: themeKey)
-        directTouch = defaults.bool(forKey: touchKey)
+        if defaults.object(forKey: touchModeKey) == nil {
+            // 以前の版の設定（オン/オフ）を引き継ぐ
+            touchMode = defaults.bool(forKey: touchKey) ? 1 : 0
+        } else {
+            touchMode = min(2, max(0, defaults.integer(forKey: touchModeKey)))
+        }
         audioFocus = defaults.bool(forKey: audioKey)
         view.backgroundColor = .black
         view.layer.insertSublayer(backdrop, at: 0)
@@ -191,6 +215,15 @@ final class SpaceViewController: UIViewController {
         view.addSubview(focusDim)
 
         buildLauncher()
+
+        // アプリ内キーボード
+        inputPanel.isHidden = true
+        inputPanel.onChange = { [weak self] text in self?.inputChanged(text) }
+        inputPanel.onSubmit = { [weak self] text in self?.inputSubmitted(text) }
+        inputPanel.onClose = { [weak self] in self?.closeInputPanel() }
+        view.addSubview(inputPanel)
+        // 外付けキーボードの検出を始めておく（最初の問い合わせでは見つからないことがあるため）
+        _ = GCKeyboard.coalesced
 
         NotificationCenter.default.addObserver(self, selector: #selector(keyboardChanged(_:)),
                                                name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
@@ -340,7 +373,8 @@ final class SpaceViewController: UIViewController {
 
     /// 設定に連動するボタンの文字と、操作の説明を付け直す
     private func updateSettingTitles() {
-        setTitle(touchModeButton, directTouch ? "画面操作：空間で直接" : "画面操作：最大化")
+        let touchTitles = ["画面操作：最大化", "画面操作：直接（照準の1枚）", "画面操作：直接（すべて）"]
+        setTitle(touchModeButton, touchTitles[touchMode])
         setTitle(walkStickButton, "移動スティック：" + (walkStick.isHidden ? "非表示" : "表示中"))
         setTitle(lookStickButton, "視点スティック：" + (lookStick.isHidden ? "非表示" : "表示中"))
         setTitle(radarButton, "レーダー：" + (radar.isHidden ? "非表示" : "表示中"))
@@ -348,9 +382,12 @@ final class SpaceViewController: UIViewController {
         setTitle(arrangeButton, "並べ方：" + arrangementNames[arrangement])
         setTitle(arButton, arOn ? "VRに戻す" : "ARに切り替え")
         setTitle(themeButton, "空間：" + Palette.theme.name)
-        helpLabel.text = directTouch
-            ? "照準を合わせたモニター（色付きの枠）だけタッチ操作できる ／ 枠の外を長押し：移動 ／ 枠の外でピンチ：大きさ変更"
-            : "照準をモニターに合わせる ／ どこでもタップ：開く ／ 長押し：移動 ／ ピンチ：大きさ変更"
+        let helps = [
+            "照準をモニターに合わせる ／ どこでもタップ：開く ／ 長押し：移動 ／ ピンチ：大きさ変更",
+            "照準を合わせたモニター（色付きの枠）だけタッチ操作できる ／ 枠の外を長押し：移動 ／ 枠の外でピンチ：大きさ変更",
+            "どのモニターも直接タッチで操作できる ／ 何もない所を長押し：照準のモニターを移動 ／ 何もない所でピンチ：大きさ変更"
+        ]
+        helpLabel.text = helps[touchMode]
     }
 
     // MARK: テーマ
@@ -377,6 +414,7 @@ final class SpaceViewController: UIViewController {
         walkStick.applyTheme()
         radar.applyTheme()
         launcher?.applyTheme()
+        inputPanel.applyTheme()
         for item in hudButtons {
             var config = item.button.configuration
             config?.baseBackgroundColor = item.primary ? t.accent : t.panel
@@ -398,19 +436,22 @@ final class SpaceViewController: UIViewController {
     // MARK: 設定の切り替え
 
     @objc private func toggleTouchMode() {
-        directTouch.toggle()
-        UserDefaults.standard.set(directTouch, forKey: touchKey)
+        touchMode = (touchMode + 1) % 3
+        UserDefaults.standard.set(touchMode, forKey: touchModeKey)
         view.endEditing(true)
-        for mv in monitors where mv !== focused {
-            mv.setPresentation(.spaceLocked)
-        }
         active = nil
-        if directTouch, let mv = gazed { setActive(mv) }
+        for mv in monitors where mv !== focused {
+            mv.setPresentation(touchAll ? .spaceLive : .spaceLocked)
+        }
+        if touchOne, let mv = gazed { setActive(mv) }
         refreshHighlights()
         updateSettingTitles()
-        showToast(directTouch
-                  ? "照準を合わせたモニター（色付きの枠）だけ、直接タッチして操作できます。"
-                  : "照準を合わせて画面のどこかをタップすると、手元に大きく開きます。")
+        let notes = [
+            "照準を合わせて画面のどこかをタップすると、手元に大きく開きます。",
+            "照準を合わせたモニター（色付きの枠）だけ、直接タッチして操作できます。",
+            "照準に関係なく、どのモニターも直接タッチして操作できます。"
+        ]
+        showToast(notes[touchMode])
     }
 
     @objc private func toggleWalkStick() {
@@ -463,7 +504,7 @@ final class SpaceViewController: UIViewController {
     /// 枠の色を付け直す：照準が乗っているモニターと、直接操作の対象を目立たせる
     private func refreshHighlights() {
         for mv in monitors where mv !== focused && mv !== grabbed {
-            mv.setHighlighted(mv === gazed || (directTouch && mv === active))
+            mv.setHighlighted(mv === gazed || (touchOne && mv === active))
         }
     }
 
@@ -544,25 +585,99 @@ final class SpaceViewController: UIViewController {
         let f = value.cgRectValue
         let screenH = view.window?.windowScene?.screen.bounds.height ?? view.bounds.height
         keyboardVisible = f.height > 120 && f.minY < screenH - 120
+        keyboardNote = "通知あり y=\(Int(f.minY)) 高さ=\(Int(f.height))"
+        keyboardTop = keyboardVisible ? view.convert(f, from: nil).minY : nil
+        view.setNeedsLayout()
     }
 
     @objc private func keyboardGone(_ n: Notification) {
         keyboardVisible = false
+        keyboardTop = nil
+        view.setNeedsLayout()
     }
 
-    /// 入力欄にカーソルが入ったのにキーボードが出ないとき、原因の手がかりを表示する
-    private func textFocusBegan() {
+    /// いま文字入力を受け取っている部品の種類（原因調査用）
+    private func firstResponderName() -> String {
+        guard let w = view.window, let r = findFirstResponder(in: w) else { return "なし" }
+        return String(describing: type(of: r))
+    }
+
+    private func findFirstResponder(in v: UIView) -> UIView? {
+        if v.isFirstResponder { return v }
+        for sub in v.subviews {
+            if let r = findFirstResponder(in: sub) { return r }
+        }
+        return nil
+    }
+
+    /// 入力欄にカーソルが入った。少し待ってもシステムのキーボードが出なければ、アプリ内キーボードを開く。
+    private func textFocusBegan(_ mv: MonitorView, isURL: Bool, value: String, secure: Bool) {
         view.window?.makeKey()
+        if !inputPanel.isHidden && inputMonitor === mv && inputIsURL == isURL { return }
+        if isURL ? urlKeyboardFailed : webKeyboardFailed {
+            openInputPanel(mv, isURL: isURL, value: value, secure: secure)
+            return
+        }
+        focusToken += 1
+        let token = focusToken
         Task {
-            try? await Task.sleep(nanoseconds: 1_500_000_000)
-            if self.keyboardVisible { return }
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            if self.focusToken != token || self.keyboardVisible { return }
             if GCKeyboard.coalesced != nil {
-                self.showToast("外付けキーボードが接続中のため、画面のキーボードは出ません。Bluetoothなどの接続を切ると出ます。")
+                self.showToast("外付けキーボードが接続中のため、画面のキーボードは出ません。モニター上部のキーボードのボタンで、アプリ内キーボードを開けます。")
+                return
+            }
+            let responder = self.firstResponderName()
+            let note = self.keyboardNote
+            if isURL {
+                self.urlKeyboardFailed = true
             } else {
-                let key = self.view.window?.isKeyWindow ?? false
-                self.showToast("キーボードを表示できませんでした（外付けキーボード：なし／入力先：\(key ? "OK" : "NG")）")
+                self.webKeyboardFailed = true
+            }
+            self.openInputPanel(mv, isURL: isURL, value: value, secure: secure)
+            self.showToast("キーボードが出ないため、アプリ内キーボードを開きました（診断：\(isURL ? "URL欄" : "ページ内")／\(responder)／\(note)）")
+        }
+    }
+
+    // MARK: アプリ内キーボード
+
+    private func openInputPanel(_ mv: MonitorView, isURL: Bool, value: String, secure: Bool) {
+        inputMonitor = mv
+        inputIsURL = isURL
+        inputPanel.open(title: isURL ? "URL または 検索ワードを入力して「決定」" : "ページの入力欄に入力して「決定」",
+                        text: isURL ? "" : value, secure: secure)
+        inputPanel.isHidden = false
+        view.bringSubviewToFront(inputPanel)
+        view.setNeedsLayout()
+        // システムのキーボードが使える環境なら、ここで出てくる（出なければ五十音のキーで入力する）
+        inputPanel.beginInput()
+    }
+
+    private func closeInputPanel() {
+        inputPanel.endInput()
+        inputPanel.isHidden = true
+        inputMonitor = nil
+    }
+
+    private func inputChanged(_ text: String) {
+        guard let mv = inputMonitor else { return }
+        if inputIsURL {
+            mv.setURLFieldText(text)
+        } else {
+            mv.setWebFieldValue(text)
+        }
+    }
+
+    private func inputSubmitted(_ text: String) {
+        if let mv = inputMonitor {
+            if inputIsURL {
+                mv.submitURLText(text)
+            } else {
+                mv.setWebFieldValue(text)
+                mv.submitWebField()
             }
         }
+        closeInputPanel()
     }
 
     // MARK: モニターの大きさ・形・並べ方
@@ -724,6 +839,16 @@ final class SpaceViewController: UIViewController {
         lookStick.center = clamped(point(for: lookAnchor), half: 60)
         radar.frame = CGRect(x: b.width - safe.right - 16 - 108, y: safe.top + 16, width: 108, height: 108)
         toastLabel.frame = CGRect(x: max(16, (b.width - 640) / 2), y: safe.top + 16, width: min(640, b.width - 32), height: 72)
+
+        if !inputPanel.isHidden {
+            // システムのキーボードが出ているときは、その上に入力欄だけを置く
+            inputPanel.setKeysHidden(keyboardVisible)
+            let panelW = min(b.width - 24, 860)
+            let panelH = inputPanel.preferredHeight(width: panelW)
+            let bottom = keyboardTop ?? (b.height - safe.bottom)
+            inputPanel.frame = CGRect(x: (b.width - panelW) / 2, y: max(safe.top + 8, bottom - 8 - panelH),
+                                      width: panelW, height: panelH)
+        }
 
         let center = CGPoint(x: b.midX, y: b.midY)
         for mv in monitors where mv !== focused {
@@ -925,7 +1050,7 @@ final class SpaceViewController: UIViewController {
                 gazed = hit
                 reticle.layer.borderColor = (hit == nil ? Palette.mute : Palette.accent).cgColor
                 if let h = hit {
-                    if directTouch { setActive(h) }
+                    if touchOne { setActive(h) }
                     soundOwner = h
                     if audioFocus { applyAudioFocus() }
                 }
@@ -956,7 +1081,7 @@ final class SpaceViewController: UIViewController {
                 x /= len
                 y /= len
             }
-            let hot = mv === gazed || mv === focused || (directTouch && mv === active)
+            let hot = mv === gazed || mv === focused || (touchOne && mv === active)
             blips.append(RadarView.Blip(x: CGFloat(x), y: CGFloat(y), hot: hot))
         }
         radar.update(blips)
@@ -1228,7 +1353,7 @@ final class SpaceViewController: UIViewController {
     private func unfocus() {
         guard let mv = focused else { return }
         mv.endEditing(true)
-        mv.setPresentation(directTouch && active === mv ? .spaceLive : .spaceLocked)
+        mv.setPresentation(spacePresentation(for: mv))
         mv.removeFromSuperview()
         focused = nil
         attachToWorld(mv)
@@ -1303,7 +1428,15 @@ final class SpaceViewController: UIViewController {
         let mv = MonitorView(url: url, yaw: yaw, pitch: pitch)
         mv.applyTheme()
         mv.onClose = { [weak self] in self?.unfocus() }
-        mv.onTextFocus = { [weak self] in self?.textFocusBegan() }
+        mv.onTextFocus = { [weak self, weak mv] isURL, value, secure in
+            guard let self = self, let mv = mv else { return }
+            self.textFocusBegan(mv, isURL: isURL, value: value, secure: secure)
+        }
+        mv.onKeyboard = { [weak self, weak mv] in
+            guard let self = self, let mv = mv else { return }
+            // ページ内に入力欄があればそこへ、なければURL欄へ入力する
+            self.openInputPanel(mv, isURL: !mv.hasWebField, value: mv.lastWebValue, secure: mv.lastWebSecure)
+        }
         mv.onShape = { [weak self, weak mv] in
             guard let self = self, let mv = mv else { return }
             self.cycleShape(mv)
@@ -1325,7 +1458,7 @@ final class SpaceViewController: UIViewController {
                 self?.showToast("このページで動画が見つかりませんでした。再生を始めてから、もう一度お試しください。")
             }
         }
-        mv.setPresentation(.spaceLocked)
+        mv.setPresentation(touchAll ? .spaceLive : .spaceLocked)
         monitors.append(mv)
         attachToWorld(mv)
         return mv
@@ -1339,6 +1472,7 @@ final class SpaceViewController: UIViewController {
         }
         if active === mv { active = nil }
         if gazed === mv { gazed = nil }
+        if inputMonitor === mv { closeInputPanel() }
         mv.endEditing(true)
         mv.web.stopLoading()
         mv.removeFromSuperview()

@@ -5,15 +5,63 @@
   var top = window === window.top;
 
   // ---- 入力欄にカーソルが入ったことをアプリへ知らせる ----
+  // 最後にカーソルが入った入力欄を覚えておき、アプリ内キーボードの文字をそこへ入れる
+  K.lastField = null;
+  function fieldText(t) {
+    return String(t.isContentEditable ? (t.textContent || '') : (t.value || '')).slice(0, 2000);
+  }
   document.addEventListener('focusin', function (e) {
     var t = e.target; if (!t) return;
     var n = (t.tagName || '').toLowerCase();
     var ty = (t.type || '').toLowerCase();
     if (n === 'input' && /^(button|submit|checkbox|radio|range|file|color|image|reset|hidden)$/.test(ty)) return;
     if (n === 'input' || n === 'textarea' || t.isContentEditable) {
-      try { window.webkit.messageHandlers.kukanFocus.postMessage('focus'); } catch (_) {}
+      K.lastField = t;
+      var secure = ty === 'password';
+      try {
+        // パスワード欄の中身はアプリ側へ渡さない
+        window.webkit.messageHandlers.kukanFocus.postMessage({ value: secure ? '' : fieldText(t), secure: secure });
+      } catch (_) {}
     }
   }, true);
+
+  // 覚えている入力欄がまだページ上にあるか
+  K.hasField = function () {
+    return !!(K.lastField && K.lastField.isConnected);
+  };
+
+  // 入力欄の中身を丸ごと置き換える（ページ側のプログラムにも変更が伝わるよう、入力イベントを出す）
+  K.setFieldValue = function (text) {
+    var t = K.lastField;
+    if (!t || !t.isConnected) return false;
+    if (t.isContentEditable) {
+      t.focus();
+      document.execCommand('selectAll', false, null);
+      document.execCommand('insertText', false, text);
+      return true;
+    }
+    var proto = (t.tagName || '').toLowerCase() === 'textarea' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+    var desc = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (desc && desc.set) desc.set.call(t, text); else t.value = text;
+    t.dispatchEvent(new Event('input', { bubbles: true }));
+    t.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  };
+
+  // 決定（Enter）：ページがEnterキーを自分で処理しなければ、フォームを送信する
+  K.submitField = function () {
+    var t = K.lastField;
+    if (!t || !t.isConnected) return false;
+    var opts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
+    var go = t.dispatchEvent(new KeyboardEvent('keydown', opts));
+    t.dispatchEvent(new KeyboardEvent('keypress', opts));
+    t.dispatchEvent(new KeyboardEvent('keyup', opts));
+    if ((t.tagName || '').toLowerCase() === 'textarea' && !t.form) return true;
+    if (go && t.form) {
+      if (t.form.requestSubmit) t.form.requestSubmit(); else t.form.submit();
+    }
+    return true;
+  };
 
   // ---- 消音（音声フォーカス用）：アプリが消した音だけを、あとで戻す ----
   K.muted = false;

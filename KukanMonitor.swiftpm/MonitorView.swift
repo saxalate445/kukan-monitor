@@ -23,7 +23,9 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
 
     var onClose: (() -> Void)?
     var onMaximize: (() -> Void)?
-    var onTextFocus: (() -> Void)?
+    /// 入力欄にカーソルが入った（URL欄かどうか、いまの中身、パスワード欄かどうか）
+    var onTextFocus: ((Bool, String, Bool) -> Void)?
+    var onKeyboard: (() -> Void)?
     var onDelete: (() -> Void)?
     var onChange: (() -> Void)?
     var onShape: (() -> Void)?
@@ -36,12 +38,17 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
     /// 音声フォーカスで音を消しているか
     private(set) var muted = false
     private(set) var presentation = MonitorPresentation.spaceLocked
+    /// ページ内で最後にカーソルが入った入力欄があるか、その中身、パスワード欄かどうか
+    private(set) var hasWebField = false
+    private(set) var lastWebValue = ""
+    private(set) var lastWebSecure = false
 
     private let homeURL: URL
     private let bar = UIStackView()
     private let field = UITextField()
     private let muteBadge = UIImageView(image: UIImage(systemName: "speaker.slash.fill"))
     private var highlighted = false
+    private var lastTouchTime: CFTimeInterval = 0
     private var barButtons: [UIButton] = []
     private var closeButton: UIButton?
     private var maximizeButton: UIButton?
@@ -110,6 +117,7 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
         field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         bar.addArrangedSubview(field)
 
+        bar.addArrangedSubview(makeButton(symbol: "keyboard", title: nil, action: #selector(keyboardTapped)))
         bar.addArrangedSubview(makeButton(symbol: "play.rectangle.fill", title: nil, action: #selector(fillTapped)))
         let maximize = makeButton(symbol: "arrow.up.left.and.arrow.down.right", title: nil, action: #selector(maximizeTapped))
         bar.addArrangedSubview(maximize)
@@ -289,6 +297,7 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
         }
     }
     @objc private func fillTapped() { toggleVideoFill() }
+    @objc private func keyboardTapped() { onKeyboard?() }
     @objc private func closeTapped() { onClose?() }
     @objc private func maximizeTapped() { onMaximize?() }
     @objc private func shapeTapped() { onShape?() }
@@ -296,15 +305,63 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
 
     // MARK: 文字入力
 
-    /// URL欄やページ内の入力欄にカーソルが入った
-    func textFocusBegan() { onTextFocus?() }
+    /// ページ内の入力欄にカーソルが入った（補助スクリプトからの知らせ）
+    func webFieldFocused(value: String, secure: Bool) {
+        hasWebField = true
+        lastWebValue = value
+        lastWebSecure = secure
+        // ページが自動でカーソルを入れただけの場合（検索サイトの最初の画面など）は知らせない。
+        // 直前にこのモニターを触っていたときだけ、入力を始めたものとして扱う。
+        if CACurrentMediaTime() - lastTouchTime < 2.0 {
+            onTextFocus?(false, value, secure)
+        }
+    }
 
-    func textFieldDidBeginEditing(_ textField: UITextField) { textFocusBegan() }
+    func textFieldDidBeginEditing(_ textField: UITextField) {
+        onTextFocus?(true, textField.text ?? "", false)
+    }
+
+    /// 文字列を、JavaScriptにそのまま書ける形（引用符つき）にする
+    private static func jsString(_ text: String) -> String {
+        if let data = try? JSONEncoder().encode(text), let s = String(data: data, encoding: .utf8) {
+            return s
+        }
+        return "\"\""
+    }
+
+    /// アプリ内キーボードの文字を、ページ内の入力欄へ入れる
+    func setWebFieldValue(_ text: String) {
+        lastWebValue = text
+        let js = "window.__kukan && window.__kukan.setFieldValue(" + MonitorView.jsString(text) + ")"
+        web.evaluateJavaScript(js, completionHandler: nil)
+    }
+
+    /// ページ内の入力欄で「決定」（Enter）を押す
+    func submitWebField() {
+        web.evaluateJavaScript("window.__kukan && window.__kukan.submitField()", completionHandler: nil)
+    }
+
+    /// アプリ内キーボードの文字を、上部のURL欄に表示する
+    func setURLFieldText(_ text: String) {
+        field.text = text
+    }
+
+    /// URL欄の文字を確定して開く（URLでなければ検索）
+    func submitURLText(_ text: String) {
+        field.resignFirstResponder()
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let url = MonitorView.url(from: trimmed) {
+            load(url)
+        }
+    }
 
     /// タッチされたら、このアプリの画面を文字入力の受け取り先にしておく
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         let hit = super.hitTest(point, with: event)
-        if hit != nil, let w = window, !w.isKeyWindow { w.makeKey() }
+        if hit != nil {
+            lastTouchTime = CACurrentMediaTime()
+            if let w = window, !w.isKeyWindow { w.makeKey() }
+        }
         return hit
     }
 
@@ -336,6 +393,9 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         refreshField()
+        hasWebField = false
+        lastWebValue = ""
+        lastWebSecure = false
         // 新しいページは「動画を広げる」が解除された状態から始まる
         if videoFill {
             videoFill = false

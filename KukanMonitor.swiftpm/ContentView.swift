@@ -238,7 +238,10 @@ final class WeakScriptHandler: NSObject, WKScriptMessageHandler {
     weak var owner: MonitorView?
     func userContentController(_ userContentController: WKUserContentController,
                                didReceive message: WKScriptMessage) {
-        owner?.textFocusBegan()
+        let body = message.body as? [String: Any]
+        let value = body?["value"] as? String ?? ""
+        let secure = body?["secure"] as? Bool ?? false
+        owner?.webFieldFocused(value: value, secure: secure)
     }
 }
 
