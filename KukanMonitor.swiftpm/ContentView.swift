@@ -3,6 +3,7 @@ import UIKit
 import WebKit
 import CoreMotion
 import AVFoundation
+import GameController
 
 // 空間モニター
 // iPadを動かして周囲を見回し、空間に浮かぶ複数のブラウザ画面を操作するアプリ。
@@ -207,6 +208,24 @@ final class JoystickView: UIView {
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) { reset() }
 }
 
+/// ページ内の入力欄にカーソルが入ったことを、モニターへ知らせる中継役
+@MainActor
+final class WeakScriptHandler: NSObject, WKScriptMessageHandler {
+    weak var owner: MonitorView?
+    func userContentController(_ userContentController: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        owner?.textFocusBegan()
+    }
+}
+
+/// 丸いボタンやスティックの置き場所。近い側の画面端からの距離で覚える。
+struct FloatAnchor {
+    var right: Bool
+    var bottom: Bool
+    var dx: CGFloat
+    var dy: CGFloat
+}
+
 /// モニターの置かれ方
 enum MonitorPresentation {
     case spaceLocked   // 空間内・タッチ不可（タップで最大化する設定のとき）
@@ -246,6 +265,7 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
     private var barButtons: [UIButton] = []
     var onClose: (() -> Void)?
     var onMaximize: (() -> Void)?
+    var onTextFocus: (() -> Void)?
     var onDelete: (() -> Void)?
     var onChange: (() -> Void)?
 
@@ -263,9 +283,28 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
         self.homeURL = url
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
+        // YouTubeなどの全画面ボタンを使えるようにする
+        config.preferences.isElementFullscreenEnabled = true
+        // ページ内の入力欄にカーソルが入ったら知らせてもらう（キーボードが出ないときの対処用）
+        let focusHandler = WeakScriptHandler()
+        config.userContentController.add(focusHandler, name: "kukanFocus")
+        let focusScript = """
+        document.addEventListener('focusin', function (e) {
+          var t = e.target; if (!t) return;
+          var n = (t.tagName || '').toLowerCase();
+          var ty = (t.type || '').toLowerCase();
+          if (n === 'input' && /^(button|submit|checkbox|radio|range|file|color|image|reset|hidden)$/.test(ty)) return;
+          if (n === 'input' || n === 'textarea' || t.isContentEditable) {
+            try { window.webkit.messageHandlers.kukanFocus.postMessage('focus'); } catch (_) {}
+          }
+        }, true);
+        """
+        config.userContentController.addUserScript(
+            WKUserScript(source: focusScript, injectionTime: .atDocumentStart, forMainFrameOnly: false))
         self.web = WKWebView(frame: .zero, configuration: config)
         super.init(frame: CGRect(origin: .zero, size: MonitorView.shapes[0].size))
 
+        focusHandler.owner = self
         backgroundColor = Palette.panel
         layer.cornerRadius = 14
         layer.borderWidth = 3
@@ -396,6 +435,18 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
     @objc private func shapeTapped() { onShape?() }
     @objc private func deleteTapped() { onDelete?() }
 
+    /// URL欄やページ内の入力欄にカーソルが入った
+    func textFocusBegan() { onTextFocus?() }
+
+    func textFieldDidBeginEditing(_ textField: UITextField) { textFocusBegan() }
+
+    /// タッチされたら、このアプリの画面を文字入力の受け取り先にしておく
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        let hit = super.hitTest(point, with: event)
+        if hit != nil, let w = window, !w.isKeyWindow { w.makeKey() }
+        return hit
+    }
+
     func textFieldShouldReturn(_ textField: UITextField) -> Bool {
         let text = (textField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         textField.resignFirstResponder()
@@ -464,7 +515,12 @@ final class SpaceViewController: UIViewController {
     private var lookStickButton: UIButton?
     private var walkStickButton: UIButton?
     private var menuOpen = true
-    private var floatingPlaced = false
+    private var menuAnchor = FloatAnchor(right: false, bottom: false, dx: 50, dy: 50)
+    private var walkAnchor = FloatAnchor(right: false, bottom: true, dx: 84, dy: 96)
+    private var lookAnchor = FloatAnchor(right: true, bottom: true, dx: 84, dy: 96)
+    private var walkMoved = false
+    private var lookMoved = false
+    private var keyboardVisible = false
     private var pitchOffset = 0.0
     private var pinchTarget: MonitorView?
     private var stickGrabOffset = CGPoint.zero
@@ -624,6 +680,11 @@ final class SpaceViewController: UIViewController {
         focusDim.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(dimTapped)))
         view.addSubview(focusDim)
 
+        NotificationCenter.default.addObserver(self, selector: #selector(keyboardChanged(_:)),
+                                               name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(keyboardGone(_:)),
+                                               name: UIResponder.keyboardDidHideNotification, object: nil)
+
         makeStars()
         loadMonitors()
         applyTheme()
@@ -644,6 +705,7 @@ final class SpaceViewController: UIViewController {
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         UIApplication.shared.isIdleTimerDisabled = true
+        view.window?.makeKey()
     }
 
     private func makeHUDButton(_ title: String, primary: Bool, action: Selector) -> UIButton {
@@ -744,6 +806,7 @@ final class SpaceViewController: UIViewController {
     @objc private func toggleMenu() {
         menuOpen.toggle()
         buttonRow.isHidden = !menuOpen
+        view.setNeedsLayout()
     }
 
     @objc private func toggleWalkStick() {
@@ -767,6 +830,7 @@ final class SpaceViewController: UIViewController {
         let d = g.translation(in: view)
         g.setTranslation(.zero, in: view)
         menuButton.center = clamped(CGPoint(x: menuButton.center.x + d.x, y: menuButton.center.y + d.y), half: 29)
+        menuAnchor = anchor(for: menuButton.center)
     }
 
     @objc private func dragStick(_ g: UILongPressGestureRecognizer) {
@@ -780,9 +844,61 @@ final class SpaceViewController: UIViewController {
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
         case .changed:
             stick.center = clamped(CGPoint(x: p.x + stickGrabOffset.x, y: p.y + stickGrabOffset.y), half: 60)
+            if stick === walkStick {
+                walkAnchor = anchor(for: stick.center)
+                walkMoved = true
+            } else {
+                lookAnchor = anchor(for: stick.center)
+                lookMoved = true
+            }
         default:
             stick.alpha = 1
             stick.reset()
+        }
+    }
+
+    private func point(for a: FloatAnchor) -> CGPoint {
+        let b = view.bounds
+        let safe = view.safeAreaInsets
+        return CGPoint(x: a.right ? b.width - safe.right - a.dx : safe.left + a.dx,
+                       y: a.bottom ? b.height - safe.bottom - a.dy : safe.top + a.dy)
+    }
+
+    private func anchor(for p: CGPoint) -> FloatAnchor {
+        let b = view.bounds
+        let safe = view.safeAreaInsets
+        let right = p.x > b.midX
+        let bottom = p.y > b.midY
+        return FloatAnchor(right: right, bottom: bottom,
+                           dx: right ? b.width - safe.right - p.x : p.x - safe.left,
+                           dy: bottom ? b.height - safe.bottom - p.y : p.y - safe.top)
+    }
+
+    // MARK: キーボード
+
+    @objc private func keyboardChanged(_ n: Notification) {
+        guard let value = n.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue else { return }
+        let f = value.cgRectValue
+        let screenH = view.window?.windowScene?.screen.bounds.height ?? view.bounds.height
+        keyboardVisible = f.height > 120 && f.minY < screenH - 120
+    }
+
+    @objc private func keyboardGone(_ n: Notification) {
+        keyboardVisible = false
+    }
+
+    /// 入力欄にカーソルが入ったのにキーボードが出ないとき、原因の手がかりを表示する
+    private func textFocusBegan() {
+        view.window?.makeKey()
+        Task {
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            if self.keyboardVisible { return }
+            if GCKeyboard.coalesced != nil {
+                self.showToast("外付けキーボードが接続中のため、画面のキーボードは出ません。Bluetoothなどの接続を切ると出ます。")
+            } else {
+                let key = self.view.window?.isKeyWindow ?? false
+                self.showToast("キーボードを表示できませんでした（外付けキーボード：なし／入力先：\(key ? "OK" : "NG")）")
+            }
         }
     }
 
@@ -876,19 +992,16 @@ final class SpaceViewController: UIViewController {
         let rowSize = CGSize(width: min(fit.width, b.width - 24), height: fit.height)
         let rowY = b.height - safe.bottom - 16 - rowSize.height
         buttonRow.frame = CGRect(x: (b.width - rowSize.width) / 2, y: rowY, width: rowSize.width, height: rowSize.height)
-        if !floatingPlaced && b.width > 0 {
-            floatingPlaced = true
-            menuButton.center = CGPoint(x: safe.left + 50, y: safe.top + 50)
-            // メニューの横に置けるなら親指の届く下側へ、狭ければメニューの上へ
-            let fitsBeside = b.width - rowSize.width >= 2 * 164
-            let stickY = fitsBeside ? b.height - safe.bottom - 96 : rowY - 80
-            walkStick.center = CGPoint(x: safe.left + 84, y: stickY)
-            lookStick.center = CGPoint(x: b.width - safe.right - 84, y: stickY)
-        }
-        menuButton.center = clamped(menuButton.center, half: 29)
-        walkStick.center = clamped(walkStick.center, half: 60)
-        lookStick.center = clamped(lookStick.center, half: 60)
-        toastLabel.frame = CGRect(x: max(16, (b.width - 520) / 2), y: safe.top + 16, width: min(520, b.width - 32), height: 56)
+        // 置き場所は画面端からの距離で決めるので、回転や画面サイズの変化にもついてくる。
+        // 動かしていないスティックは、メニューの横に置けるなら下側へ、狭ければメニューの上へ。
+        let fitsBeside = buttonRow.isHidden || b.width - rowSize.width >= 2 * 164
+        let defaultDY = fitsBeside ? 96 : (b.height - safe.bottom) - (rowY - 80)
+        if !walkMoved { walkAnchor.dy = defaultDY }
+        if !lookMoved { lookAnchor.dy = defaultDY }
+        menuButton.center = clamped(point(for: menuAnchor), half: 29)
+        walkStick.center = clamped(point(for: walkAnchor), half: 60)
+        lookStick.center = clamped(point(for: lookAnchor), half: 60)
+        toastLabel.frame = CGRect(x: max(16, (b.width - 640) / 2), y: safe.top + 16, width: min(640, b.width - 32), height: 72)
 
         let center = CGPoint(x: b.midX, y: b.midY)
         for mv in monitors where mv !== focused {
@@ -1297,6 +1410,7 @@ final class SpaceViewController: UIViewController {
         let mv = MonitorView(url: url, yaw: yaw, pitch: pitch)
         mv.applyTheme()
         mv.onClose = { [weak self] in self?.unfocus() }
+        mv.onTextFocus = { [weak self] in self?.textFocusBegan() }
         mv.onShape = { [weak self, weak mv] in
             guard let self = self, let mv = mv else { return }
             self.cycleShape(mv)
