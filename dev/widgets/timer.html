@@ -1,0 +1,38 @@
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>タイマー</title>
+<style>/*BASE*/
+#wrap{position:relative;width:46vmin;height:46vmin}
+svg{width:100%;height:100%;transform:rotate(-90deg)}
+circle{fill:none;stroke-width:5}
+#bg{stroke:color-mix(in srgb,var(--k-mute) 30%,transparent)}
+#fg{stroke:var(--k-accent);stroke-linecap:round;transition:stroke-dashoffset .3s linear}
+#time{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:12vmin;font-weight:600}
+body.done #time{color:var(--k-accent)}
+#presets button{min-width:0;padding:1.6vmin 3vmin;font-size:3vmin}
+</style></head><body>
+<h1>タイマー</h1>
+<div id="wrap"><svg viewBox="0 0 100 100"><circle id="bg" cx="50" cy="50" r="45"/><circle id="fg" cx="50" cy="50" r="45"/></svg>
+<div id="time" class="mono">25:00</div></div>
+<div class="row" id="presets"><button data-m="5">5分</button><button data-m="15">15分</button><button data-m="25" class="on">25分</button><button data-m="50">50分</button></div>
+<div class="row"><button id="go" class="primary">スタート</button><button id="reset">リセット</button></div>
+<script>
+var total=25*60,left=total,endAt=0,timer=0,C=2*Math.PI*45,fg=document.getElementById('fg'),ac=null;
+fg.style.strokeDasharray=C;
+function show(){var m=Math.floor(left/60),s=Math.round(left%60);if(s===60){m++;s=0}
+  document.getElementById('time').textContent=String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');
+  fg.style.strokeDashoffset=C*(1-left/total);}
+function beep(){try{ac=ac||new (window.AudioContext||window.webkitAudioContext)();[0,.35,.7].forEach(function(t){var o=ac.createOscillator(),g=ac.createGain();
+  o.frequency.value=880;g.gain.setValueAtTime(.0001,ac.currentTime+t);g.gain.exponentialRampToValueAtTime(.3,ac.currentTime+t+.02);
+  g.gain.exponentialRampToValueAtTime(.0001,ac.currentTime+t+.3);o.connect(g);g.connect(ac.destination);o.start(ac.currentTime+t);o.stop(ac.currentTime+t+.32);});}catch(e){}}
+function stop(){clearInterval(timer);timer=0;document.getElementById('go').textContent='スタート';}
+function step(){left=Math.max(0,(endAt-Date.now())/1000);show();if(left<=0){stop();document.body.classList.add('done');beep();}}
+document.getElementById('go').onclick=function(){
+  try{ac=ac||new (window.AudioContext||window.webkitAudioContext)();ac.resume();}catch(e){}
+  if(timer){stop();return}
+  if(left<=0)left=total;document.body.classList.remove('done');
+  endAt=Date.now()+left*1000;timer=setInterval(step,250);this.textContent='一時停止';};
+document.getElementById('reset').onclick=function(){stop();left=total;document.body.classList.remove('done');show();};
+document.querySelectorAll('#presets button').forEach(function(b){b.onclick=function(){
+  document.querySelectorAll('#presets button').forEach(function(x){x.classList.remove('on')});b.classList.add('on');
+  stop();total=left=(+b.dataset.m)*60;document.body.classList.remove('done');show();};});
+show();
+</script></body></html>

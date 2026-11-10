@@ -1,0 +1,25 @@
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>時計</title>
+<style>/*BASE*/
+#time{font-size:24vmin;font-weight:600;line-height:1;letter-spacing:-.02em}
+#sec{font-size:9vmin;color:var(--k-accent);margin-left:1.5vmin}
+#date{font-size:5vmin}
+#day{width:70vw;height:1.2vmin;border-radius:1vmin;background:color-mix(in srgb,var(--k-mute) 30%,transparent);overflow:hidden}
+#day i{display:block;height:100%;background:var(--k-accent);width:0}
+#left{font-size:3.2vmin}
+</style></head><body>
+<h1>時計</h1>
+<div class="mono"><span id="time">--:--</span><span id="sec">--</span></div>
+<div id="date"></div>
+<div id="day"><i id="bar"></i></div>
+<div id="left" class="mute"></div>
+<script>
+var W='日月火水木金土', z=function(n){return String(n).padStart(2,'0')};
+function tick(){var d=new Date();
+  document.getElementById('time').textContent=z(d.getHours())+':'+z(d.getMinutes());
+  document.getElementById('sec').textContent=z(d.getSeconds());
+  document.getElementById('date').textContent=d.getFullYear()+'年'+(d.getMonth()+1)+'月'+d.getDate()+'日（'+W[d.getDay()]+'）';
+  var s=d.getHours()*3600+d.getMinutes()*60+d.getSeconds(), r=86400-s;
+  document.getElementById('bar').style.width=(s/864).toFixed(2)+'%';
+  document.getElementById('left').textContent='今日の残り '+Math.floor(r/3600)+'時間'+Math.floor(r%3600/60)+'分';}
+tick();setInterval(tick,1000);
+</script></body></html>

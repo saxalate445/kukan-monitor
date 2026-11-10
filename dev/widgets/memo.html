@@ -1,0 +1,23 @@
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>メモ</title>
+<style>/*BASE*/
+body{align-items:stretch;justify-content:flex-start;gap:2vmin}
+header{display:flex;align-items:center;justify-content:space-between;gap:2vmin}
+textarea{flex:1;width:100%;resize:none;border:.3vmin solid color-mix(in srgb,var(--k-mute) 45%,transparent);border-radius:2vmin;
+  background:color-mix(in srgb,var(--k-fg) 6%,transparent);color:var(--k-fg);font:4vmin/1.6 inherit;padding:2.5vmin;outline:none;
+  -webkit-user-select:text;user-select:text}
+textarea:focus{border-color:var(--k-accent)}
+header button{min-width:0;padding:1.4vmin 3vmin;font-size:3vmin}
+#info{font-size:2.8vmin}
+</style></head><body>
+<header><h1>メモ</h1><span id="info" class="mute"></span><button id="clear">消去</button></header>
+<textarea id="t" placeholder="ここに書いた内容は、このiPadの中に自動で保存されます。"></textarea>
+<script>
+var t=document.getElementById('t'),info=document.getElementById('info'),KEY='kukan.memo',armed=0;
+function load(){try{return localStorage.getItem(KEY)||''}catch(e){return ''}}
+function save(){try{localStorage.setItem(KEY,t.value);info.textContent=t.value.length+'文字・保存済み'}catch(e){info.textContent='保存できませんでした'}}
+t.value=load();info.textContent=t.value.length+'文字';
+t.addEventListener('input',save);
+document.getElementById('clear').onclick=function(){
+  if(!armed){armed=1;this.textContent='もう一度押すと消去';this.classList.add('on');var b=this;setTimeout(function(){armed=0;b.textContent='消去';b.classList.remove('on')},3000);return}
+  armed=0;this.textContent='消去';this.classList.remove('on');t.value='';save();};
+</script></body></html>

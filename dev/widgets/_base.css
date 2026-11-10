@@ -1,0 +1,13 @@
+:root{--k-bg:#141d3a;--k-fg:#e9edf9;--k-mute:#95a2c6;--k-accent:#ffb454}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--k-bg);color:var(--k-fg);font-family:-apple-system,"Hiragino Sans","Yu Gothic UI",system-ui,sans-serif;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3vmin;padding:4vmin;overflow:hidden;
+  -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+h1{margin:0;font-size:3.2vmin;font-weight:600;letter-spacing:.18em;color:var(--k-mute)}
+.row{display:flex;gap:2vmin;flex-wrap:wrap;justify-content:center}
+button{font:600 3.6vmin/1 inherit;color:var(--k-fg);background:transparent;border:.4vmin solid var(--k-mute);border-radius:99vmin;
+  padding:2.2vmin 4vmin;min-width:16vmin;cursor:pointer}
+button.on,button.primary{background:var(--k-accent);border-color:var(--k-accent);color:#1b1206}
+.mono{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-variant-numeric:tabular-nums}
+.mute{color:var(--k-mute)}

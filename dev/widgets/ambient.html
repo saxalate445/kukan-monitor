@@ -1,0 +1,35 @@
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>環境音</title>
+<style>/*BASE*/
+canvas{width:80vw;height:18vmin}
+#sounds button{min-width:22vmin}
+label{display:flex;align-items:center;gap:2vmin;font-size:3.2vmin}
+input[type=range]{width:44vw;accent-color:var(--k-accent)}
+#note{font-size:2.8vmin}
+</style></head><body>
+<h1>環境音</h1>
+<canvas id="c" width="640" height="140"></canvas>
+<div class="row" id="sounds"><button data-s="rain">雨</button><button data-s="wave">波</button><button data-s="wind">風</button></div>
+<label>音量<input id="vol" type="range" min="0" max="100" value="60"></label>
+<div id="note" class="mute">ボタンで鳴らす／もう一度押すと止まる。重ねて鳴らせます。</div>
+<script>
+var ac=null,master=null,an=null,playing={},data=null;
+function setup(){if(ac)return;ac=new (window.AudioContext||window.webkitAudioContext)();master=ac.createGain();an=ac.createAnalyser();an.fftSize=128;
+  data=new Uint8Array(an.frequencyBinCount);master.gain.value=document.getElementById('vol').value/100*.8;master.connect(an);an.connect(ac.destination);}
+function noise(){var n=ac.sampleRate*3,buf=ac.createBuffer(1,n,ac.sampleRate),d=buf.getChannelData(0),last=0;
+  for(var i=0;i<n;i++){var w=Math.random()*2-1;last=(last+.02*w)/1.02;d[i]=w*.35+last*2.2;}
+  var s=ac.createBufferSource();s.buffer=buf;s.loop=true;return s;}
+function make(kind){var src=noise(),f=ac.createBiquadFilter(),g=ac.createGain(),nodes=[src];
+  if(kind==='rain'){f.type='highpass';f.frequency.value=1400;g.gain.value=.5;}
+  if(kind==='wave'){f.type='lowpass';f.frequency.value=520;g.gain.value=.5;var l=ac.createOscillator(),lg=ac.createGain();l.frequency.value=.11;lg.gain.value=.42;l.connect(lg);lg.connect(g.gain);l.start();nodes.push(l);}
+  if(kind==='wind'){f.type='bandpass';f.frequency.value=420;f.Q.value=.7;g.gain.value=.7;var l2=ac.createOscillator(),lg2=ac.createGain();l2.frequency.value=.07;lg2.gain.value=260;l2.connect(lg2);lg2.connect(f.frequency);l2.start();nodes.push(l2);}
+  src.connect(f);f.connect(g);g.connect(master);src.start();return {gain:g,nodes:nodes};}
+document.querySelectorAll('#sounds button').forEach(function(b){b.onclick=function(){setup();ac.resume();var k=b.dataset.s;
+  if(playing[k]){playing[k].nodes.forEach(function(n){try{n.stop()}catch(e){}});playing[k].gain.disconnect();delete playing[k];b.classList.remove('on');}
+  else{playing[k]=make(k);b.classList.add('on');}};});
+document.getElementById('vol').oninput=function(){if(master)master.gain.value=this.value/100*.8;};
+var c=document.getElementById('c'),x=c.getContext('2d');
+function draw(){requestAnimationFrame(draw);var w=c.width,h=c.height,n=40,bw=w/n,cs=getComputedStyle(document.documentElement);
+  x.clearRect(0,0,w,h);var on=an&&Object.keys(playing).length;if(on)an.getByteFrequencyData(data);
+  for(var i=0;i<n;i++){var v=on?data[i]/255:0,bh=4+v*(h-10);x.fillStyle=v>.03?cs.getPropertyValue('--k-accent'):cs.getPropertyValue('--k-mute');x.fillRect(i*bw+2,(h-bh)/2,bw-4,bh);}}
+draw();
+</script></body></html>
