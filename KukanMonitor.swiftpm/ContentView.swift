@@ -143,11 +143,17 @@ enum Palette {
 
 final class JoystickView: UIView {
     private let knob = UIView()
+    private let caption = UILabel()
     private(set) var vector = CGPoint.zero   // 各軸 -1...1
 
-    override init(frame: CGRect) {
-        super.init(frame: frame)
+    init(title: String) {
+        super.init(frame: CGRect(x: 0, y: 0, width: 120, height: 120))
         layer.borderWidth = 2
+        caption.text = title
+        caption.font = .systemFont(ofSize: 11, weight: .semibold)
+        caption.textAlignment = .center
+        caption.isUserInteractionEnabled = false
+        addSubview(caption)
         knob.isUserInteractionEnabled = false
         knob.bounds = CGRect(x: 0, y: 0, width: 48, height: 48)
         knob.layer.cornerRadius = 24
@@ -163,11 +169,13 @@ final class JoystickView: UIView {
         backgroundColor = Palette.panel.withAlphaComponent(0.55)
         layer.borderColor = Palette.edge.cgColor
         knob.backgroundColor = Palette.accent
+        caption.textColor = Palette.ink
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
         layer.cornerRadius = bounds.width / 2
+        caption.frame = CGRect(x: 0, y: 8, width: bounds.width, height: 14)
         if vector == .zero { knob.center = CGPoint(x: bounds.midX, y: bounds.midY) }
     }
 
@@ -408,10 +416,14 @@ final class SpaceViewController: UIViewController {
     private let helpLabel = UILabel()
     private let buttonRow = UIStackView()
     private let menuButton = UIButton(type: .system)
-    private let joystick = JoystickView(frame: CGRect(x: 0, y: 0, width: 120, height: 120))
+    private let lookStick = JoystickView(title: "視点")
+    private let walkStick = JoystickView(title: "移動")
+    private var camPos = Vec3(0, 0, 0)      // 空間内での自分の位置
+    private let walkLimit = 850.0           // 中心から動ける距離
     private var hudButtons: [(button: UIButton, primary: Bool)] = []
     private var themeButton: UIButton?
-    private var stickButton: UIButton?
+    private var lookStickButton: UIButton?
+    private var walkStickButton: UIButton?
     private var menuOpen = true
     private var floatingPlaced = false
     private var pitchOffset = 0.0
@@ -482,7 +494,7 @@ final class SpaceViewController: UIViewController {
         reticle.layer.cornerRadius = 13
         view.addSubview(reticle)
 
-        helpLabel.text = "動かして見回す ／ タップで開く ／ 長押しで移動 ／ ピンチで大きさ変更"
+        helpLabel.text = "動かして見回す ／ タップで開く ／ 長押しでモニター移動 ／ ピンチで大きさ変更"
         helpLabel.font = .systemFont(ofSize: 13, weight: .medium)
         helpLabel.textAlignment = .center
         helpLabel.adjustsFontSizeToFitWidth = true
@@ -498,16 +510,23 @@ final class SpaceViewController: UIViewController {
         let theme = makeHUDButton("空間：" + Palette.theme.name, primary: false, action: #selector(nextTheme))
         themeButton = theme
         row1.addArrangedSubview(theme)
-        let stick = makeHUDButton("視点スティックを隠す", primary: false, action: #selector(toggleStick))
-        stickButton = stick
-        row1.addArrangedSubview(stick)
+
+        let rowS = UIStackView()
+        rowS.axis = .horizontal
+        rowS.spacing = 10
+        let walkB = makeHUDButton("移動スティック：表示中", primary: false, action: #selector(toggleWalkStick))
+        walkStickButton = walkB
+        rowS.addArrangedSubview(walkB)
+        let lookB = makeHUDButton("視点スティック：表示中", primary: false, action: #selector(toggleLookStick))
+        lookStickButton = lookB
+        rowS.addArrangedSubview(lookB)
 
         let row2 = UIStackView()
         row2.axis = .horizontal
         row2.spacing = 10
         row2.addArrangedSubview(makeHUDButton("拡大", primary: false, action: #selector(enlargeGazed)))
         row2.addArrangedSubview(makeHUDButton("縮小", primary: false, action: #selector(shrinkGazed)))
-        row2.addArrangedSubview(makeHUDButton("正面リセット", primary: false, action: #selector(recenter)))
+        row2.addArrangedSubview(makeHUDButton("視点リセット", primary: false, action: #selector(recenter)))
         row2.addArrangedSubview(makeHUDButton("配置リセット", primary: false, action: #selector(resetLayout)))
 
         buttonRow.axis = .vertical
@@ -515,15 +534,18 @@ final class SpaceViewController: UIViewController {
         buttonRow.spacing = 8
         buttonRow.addArrangedSubview(helpLabel)
         buttonRow.addArrangedSubview(row1)
+        buttonRow.addArrangedSubview(rowS)
         buttonRow.addArrangedSubview(row2)
         view.addSubview(buttonRow)
 
-        // 視点スティック：動かすと視点が回る。長押しすると位置を移動できる。
-        let stickMove = UILongPressGestureRecognizer(target: self, action: #selector(moveStick(_:)))
-        stickMove.minimumPressDuration = 0.4
-        stickMove.allowableMovement = 8
-        joystick.addGestureRecognizer(stickMove)
-        view.addSubview(joystick)
+        // スティック2つ：左下＝自分の移動、右下＝視点。長押しすると置き場所を動かせる。
+        for stick in [walkStick, lookStick] {
+            let move = UILongPressGestureRecognizer(target: self, action: #selector(dragStick(_:)))
+            move.minimumPressDuration = 0.4
+            move.allowableMovement = 8
+            stick.addGestureRecognizer(move)
+            view.addSubview(stick)
+        }
 
         // 丸いメニューボタン：タップでメニューの表示/非表示、ドラッグで移動。
         menuButton.setImage(UIImage(systemName: "line.3.horizontal"), for: .normal)
@@ -602,7 +624,8 @@ final class SpaceViewController: UIViewController {
         menuButton.backgroundColor = t.panel.withAlphaComponent(0.85)
         menuButton.tintColor = t.accent
         menuButton.layer.borderColor = t.edge.cgColor
-        joystick.applyTheme()
+        lookStick.applyTheme()
+        walkStick.applyTheme()
         for item in hudButtons {
             var config = item.button.configuration
             config?.baseBackgroundColor = item.primary ? t.accent : t.panel
@@ -626,10 +649,21 @@ final class SpaceViewController: UIViewController {
         buttonRow.isHidden = !menuOpen
     }
 
-    @objc private func toggleStick() {
-        joystick.isHidden.toggle()
-        joystick.reset()
-        setTitle(stickButton, joystick.isHidden ? "視点スティックを出す" : "視点スティックを隠す")
+    @objc private func toggleWalkStick() {
+        walkStick.isHidden.toggle()
+        walkStick.reset()
+        updateStickTitles()
+    }
+
+    @objc private func toggleLookStick() {
+        lookStick.isHidden.toggle()
+        lookStick.reset()
+        updateStickTitles()
+    }
+
+    private func updateStickTitles() {
+        setTitle(walkStickButton, "移動スティック：" + (walkStick.isHidden ? "非表示" : "表示中"))
+        setTitle(lookStickButton, "視点スティック：" + (lookStick.isHidden ? "非表示" : "表示中"))
     }
 
     @objc private func moveMenuButton(_ g: UIPanGestureRecognizer) {
@@ -638,19 +672,20 @@ final class SpaceViewController: UIViewController {
         menuButton.center = clamped(CGPoint(x: menuButton.center.x + d.x, y: menuButton.center.y + d.y), half: 29)
     }
 
-    @objc private func moveStick(_ g: UILongPressGestureRecognizer) {
+    @objc private func dragStick(_ g: UILongPressGestureRecognizer) {
+        guard let stick = g.view as? JoystickView else { return }
         let p = g.location(in: view)
         switch g.state {
         case .began:
-            joystick.reset()
-            stickGrabOffset = CGPoint(x: joystick.center.x - p.x, y: joystick.center.y - p.y)
-            joystick.alpha = 0.6
+            stick.reset()
+            stickGrabOffset = CGPoint(x: stick.center.x - p.x, y: stick.center.y - p.y)
+            stick.alpha = 0.6
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
         case .changed:
-            joystick.center = clamped(CGPoint(x: p.x + stickGrabOffset.x, y: p.y + stickGrabOffset.y), half: 60)
+            stick.center = clamped(CGPoint(x: p.x + stickGrabOffset.x, y: p.y + stickGrabOffset.y), half: 60)
         default:
-            joystick.alpha = 1
-            joystick.reset()
+            stick.alpha = 1
+            stick.reset()
         }
     }
 
@@ -727,11 +762,16 @@ final class SpaceViewController: UIViewController {
         buttonRow.frame = CGRect(x: (b.width - rowSize.width) / 2, y: rowY, width: rowSize.width, height: rowSize.height)
         if !floatingPlaced && b.width > 0 {
             floatingPlaced = true
-            menuButton.center = CGPoint(x: safe.left + 50, y: b.height - safe.bottom - 50)
-            joystick.center = CGPoint(x: b.width - safe.right - 84, y: b.height - safe.bottom - 190)
+            menuButton.center = CGPoint(x: safe.left + 50, y: safe.top + 50)
+            // メニューの横に置けるなら親指の届く下側へ、狭ければメニューの上へ
+            let fitsBeside = b.width - rowSize.width >= 2 * 164
+            let stickY = fitsBeside ? b.height - safe.bottom - 96 : rowY - 80
+            walkStick.center = CGPoint(x: safe.left + 84, y: stickY)
+            lookStick.center = CGPoint(x: b.width - safe.right - 84, y: stickY)
         }
         menuButton.center = clamped(menuButton.center, half: 29)
-        joystick.center = clamped(joystick.center, half: 60)
+        walkStick.center = clamped(walkStick.center, half: 60)
+        lookStick.center = clamped(lookStick.center, half: 60)
         toastLabel.frame = CGRect(x: max(16, (b.width - 520) / 2), y: safe.top + 16, width: min(520, b.width - 32), height: 56)
 
         let center = CGPoint(x: b.midX, y: b.midY)
@@ -791,18 +831,38 @@ final class SpaceViewController: UIViewController {
     }
 
     @objc private func tick() {
+        let dt = min(0.05, link.map { $0.targetTimestamp - $0.timestamp } ?? 1.0 / 60.0)
+
         // 視点スティック：倒した方向へ視点を回す
-        let stick = joystick.vector
-        if !joystick.isHidden && focused == nil && (stick.x != 0 || stick.y != 0) {
-            let step = 1.4 * (link?.duration ?? 1.0 / 60.0)
+        let look = lookStick.vector
+        if !lookStick.isHidden && focused == nil && (look.x != 0 || look.y != 0) {
+            let step = 1.4 * dt
             if motion.deviceMotion != nil {
-                yawOffset -= Double(stick.x) * step
-                pitchOffset = max(-1.3, min(1.3, pitchOffset - Double(stick.y) * step))
+                yawOffset -= Double(look.x) * step
+                pitchOffset = max(-1.3, min(1.3, pitchOffset - Double(look.y) * step))
             } else {
-                dragYaw -= Double(stick.x) * step
-                dragPitch = max(-1.4, min(1.4, dragPitch - Double(stick.y) * step))
+                dragYaw -= Double(look.x) * step
+                dragPitch = max(-1.4, min(1.4, dragPitch - Double(look.y) * step))
             }
         }
+
+        // 移動スティック：見ている向きを基準に、床の上を前後左右へ動く
+        let walk = walkStick.vector
+        if !walkStick.isHidden && focused == nil && (walk.x != 0 || walk.y != 0) {
+            let flat = (gazeDir.x * gazeDir.x + gazeDir.z * gazeDir.z).squareRoot()
+            if flat > 0.01 {
+                let f = Vec3(gazeDir.x / flat, 0, gazeDir.z / flat)
+                let r = Vec3(-f.z, 0, f.x)
+                let step = 700.0 * dt
+                var p = camPos + f * (-Double(walk.y) * step) + r * (Double(walk.x) * step)
+                let dist = (p.x * p.x + p.z * p.z).squareRoot()
+                if dist > walkLimit {
+                    p = Vec3(p.x * walkLimit / dist, 0, p.z * walkLimit / dist)
+                }
+                camPos = p
+            }
+        }
+
         let R = cameraRotation()
         let s = [1.0, -1.0, 1.0]
         var v = Mat3.identity
@@ -818,6 +878,8 @@ final class SpaceViewController: UIViewController {
         t.m11 = CGFloat(v.r[0][0]); t.m12 = CGFloat(v.r[1][0]); t.m13 = CGFloat(v.r[2][0])
         t.m21 = CGFloat(v.r[0][1]); t.m22 = CGFloat(v.r[1][1]); t.m23 = CGFloat(v.r[2][1])
         t.m31 = CGFloat(v.r[0][2]); t.m32 = CGFloat(v.r[1][2]); t.m33 = CGFloat(v.r[2][2])
+        // 自分の位置のぶんだけ空間をずらしてから回す
+        t = CATransform3DConcat(CATransform3DMakeTranslation(CGFloat(-camPos.x), CGFloat(-camPos.y), CGFloat(-camPos.z)), t)
         t = CATransform3DConcat(t, CATransform3DMakeTranslation(0, 0, CGFloat(perspective)))
         var persp = CATransform3DIdentity
         persp.m34 = CGFloat(-1.0 / perspective)
@@ -828,15 +890,14 @@ final class SpaceViewController: UIViewController {
         worldView.layer.sublayerTransform = t
 
         if let g = grabbed {
-            g.yaw = atan2(-gazeDir.x, -gazeDir.z)
-            g.pitch = asin(max(-1, min(1, gazeDir.y)))
+            let spot = spherePoint(alongRay: gazeDir)
+            g.yaw = spot.yaw
+            g.pitch = spot.pitch
             g.place()
         }
         for mv in monitors where mv !== focused {
             // 視点の後ろ側に回ったモニターは描かない
-            let halfAngle = atan(450.0 * mv.scale / MonitorView.distance)
-            let limit = min(88.0 * Double.pi / 180, 55.0 * Double.pi / 180 + halfAngle)
-            mv.isHidden = gazeDir.dot(direction(yaw: mv.yaw, pitch: mv.pitch)) < cos(limit)
+            mv.isHidden = !isOnScreen(mv)
         }
         if focused == nil && grabbed == nil {
             let hit = monitor(alongRay: gazeDir)
@@ -862,9 +923,10 @@ final class SpaceViewController: UIViewController {
             let halfW = baseW * mv.scale, halfH = baseH * mv.scale
             let n = direction(yaw: a, pitch: b)
             let k = d.dot(n)
-            if k < 0.05 { continue }
-            let tt = MonitorView.distance / k
-            let p = d * tt - n * MonitorView.distance
+            if k < 0.02 { continue }
+            let tt = (MonitorView.distance - camPos.dot(n)) / k
+            if tt <= 0 { continue }
+            let p = camPos + d * tt - n * MonitorView.distance
             let right = Vec3(cos(a), 0, -sin(a))
             let down = Vec3(sin(b) * sin(a), cos(b), sin(b) * cos(a))
             if abs(p.dot(right)) <= halfW && abs(p.dot(down)) <= halfH && tt < bestT {
@@ -873,6 +935,58 @@ final class SpaceViewController: UIViewController {
             }
         }
         return best
+    }
+
+    /// 視線が、モニターを並べている球面（中心は空間の原点）に当たる場所
+    private func spherePoint(alongRay d: Vec3) -> (yaw: Double, pitch: Double) {
+        let D = MonitorView.distance
+        let od = camPos.dot(d)
+        let disc = od * od - (camPos.dot(camPos) - D * D)
+        let t = -od + max(0, disc).squareRoot()
+        let q = camPos + d * t
+        return (yaw: atan2(-q.x, -q.z), pitch: asin(max(-1, min(1, q.y / D))))
+    }
+
+    /// モニターが画面に少しでも映るか。視点の後ろ側だけにある場合は false。
+    private func isOnScreen(_ mv: MonitorView) -> Bool {
+        let a = mv.yaw, b = mv.pitch
+        let n = direction(yaw: a, pitch: b)
+        if camPos.dot(n) >= MonitorView.distance { return false }
+        let right = Vec3(cos(a), 0, -sin(a))
+        let down = Vec3(sin(b) * sin(a), cos(b), sin(b) * cos(a))
+        let center = n * MonitorView.distance
+        let hw = Double(MonitorView.spaceSize.width) / 2 * mv.scale
+        let hh = Double(MonitorView.spaceSize.height) / 2 * mv.scale
+        let signs: [(Double, Double)] = [(-1, -1), (1, -1), (1, 1), (-1, 1)]
+        let pts = signs.map { s in
+            viewMatrix.apply(center + right * (s.0 * hw) + down * (s.1 * hh) - camPos)
+        }
+        // 視点より前にある部分だけを切り出す
+        let near = -30.0
+        var poly: [Vec3] = []
+        for i in 0..<4 {
+            let p = pts[i], q = pts[(i + 1) % 4]
+            let pIn = p.z <= near, qIn = q.z <= near
+            if pIn { poly.append(p) }
+            if pIn != qIn {
+                let t = (near - p.z) / (q.z - p.z)
+                poly.append(p + (q - p) * t)
+            }
+        }
+        if poly.isEmpty { return false }
+        let bounds = view.bounds
+        let cx = Double(bounds.midX), cy = Double(bounds.midY)
+        var minX = Double.greatestFiniteMagnitude, maxX = -Double.greatestFiniteMagnitude
+        var minY = Double.greatestFiniteMagnitude, maxY = -Double.greatestFiniteMagnitude
+        for c in poly {
+            let x = cx + perspective * c.x / (-c.z)
+            let y = cy + perspective * c.y / (-c.z)
+            minX = min(minX, x); maxX = max(maxX, x)
+            minY = min(minY, y); maxY = max(maxY, y)
+        }
+        let margin = 40.0
+        return maxX >= -margin && minX <= Double(bounds.width) + margin
+            && maxY >= -margin && minY <= Double(bounds.height) + margin
     }
 
     private func ray(through point: CGPoint) -> Vec3 {
@@ -912,8 +1026,8 @@ final class SpaceViewController: UIViewController {
         }
         let grid = CGMutablePath()
         func line(_ p0: Vec3, _ p1: Vec3) {
-            var a = V.apply(p0)
-            var c = V.apply(p1)
+            var a = V.apply(p0 - camPos)
+            var c = V.apply(p1 - camPos)
             if a.z > near && c.z > near { return }
             if a.z > near {
                 let t = (near - c.z) / (a.z - c.z)
@@ -1025,7 +1139,8 @@ final class SpaceViewController: UIViewController {
         mv.setHighlighted(true)
         focusDim.isHidden = false
         reticle.isHidden = true
-        joystick.reset()
+        lookStick.reset()
+        walkStick.reset()
         view.bringSubviewToFront(focusDim)
         view.addSubview(mv)
         // 文字入力を受け取れるよう、このウィンドウを入力先にする
@@ -1092,9 +1207,8 @@ final class SpaceViewController: UIViewController {
             return
         }
         guard let url = URL(string: "https://www.google.com/") else { return }
-        let yaw = atan2(-gazeDir.x, -gazeDir.z)
-        let pitch = asin(max(-1, min(1, gazeDir.y)))
-        let mv = makeMonitor(url: url, yaw: yaw, pitch: pitch)
+        let spot = spherePoint(alongRay: gazeDir)
+        let mv = makeMonitor(url: url, yaw: spot.yaw, pitch: spot.pitch)
         saveMonitors()
         focus(mv)
     }
@@ -1107,6 +1221,7 @@ final class SpaceViewController: UIViewController {
             dragPitch = 0
         }
         pitchOffset = 0
+        camPos = Vec3(0, 0, 0)
     }
 
     @objc private func resetLayout() {
