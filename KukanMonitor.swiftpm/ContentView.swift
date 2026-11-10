@@ -206,6 +206,21 @@ final class JoystickView: UIView {
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) { reset() }
 }
 
+/// モニターの置かれ方
+enum MonitorPresentation {
+    case spaceLocked   // 空間内・タッチ不可（タップで最大化する設定のとき）
+    case spaceLive     // 空間内・そのままタッチ操作できる
+    case maximized     // 手元に大きく開いている
+}
+
+/// 自分自身ではタッチを受け取らず、中の部品に当たったときだけ反応する入れ物
+final class PassthroughView: UIView {
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        let hit = super.hitTest(point, with: event)
+        return hit === self ? nil : hit
+    }
+}
+
 // MARK: - モニター（ブラウザ1枚）
 
 final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextFieldDelegate {
@@ -218,6 +233,7 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
     private var highlighted = false
     private var barButtons: [UIButton] = []
     var onClose: (() -> Void)?
+    var onMaximize: (() -> Void)?
     var onDelete: (() -> Void)?
     var onChange: (() -> Void)?
 
@@ -226,6 +242,7 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
     private let bar = UIStackView()
     private let field = UITextField()
     private var closeButton: UIButton?
+    private var maximizeButton: UIButton?
     private var deleteButton: UIButton?
 
     init(url: URL, yaw: Double, pitch: Double) {
@@ -274,6 +291,9 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
         field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         bar.addArrangedSubview(field)
 
+        let maximize = makeButton(symbol: "arrow.up.left.and.arrow.down.right", title: nil, action: #selector(maximizeTapped))
+        bar.addArrangedSubview(maximize)
+        maximizeButton = maximize
         let close = makeButton(symbol: nil, title: "空間に戻す", action: #selector(closeTapped))
         let delete = makeButton(symbol: nil, title: "削除", action: #selector(deleteTapped))
         barButtons.removeAll { $0 === delete }
@@ -283,7 +303,7 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
         closeButton = close
         deleteButton = delete
 
-        setFocused(false)
+        setPresentation(.spaceLocked)
         field.text = url.absoluteString
         web.load(URLRequest(url: url))
     }
@@ -325,11 +345,12 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
         layer.transform = t
     }
 
-    func setFocused(_ on: Bool) {
-        isUserInteractionEnabled = on
-        closeButton?.isHidden = !on
-        deleteButton?.isHidden = !on
-        if !on { field.resignFirstResponder() }
+    func setPresentation(_ p: MonitorPresentation) {
+        isUserInteractionEnabled = p != .spaceLocked
+        maximizeButton?.isHidden = p != .spaceLive
+        closeButton?.isHidden = p != .maximized
+        deleteButton?.isHidden = p != .maximized
+        if p == .spaceLocked { endEditing(true) }
     }
 
     func setHighlighted(_ on: Bool) {
@@ -355,6 +376,7 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
     @objc private func goForward() { web.goForward() }
     @objc private func reload() { web.reload() }
     @objc private func closeTapped() { onClose?() }
+    @objc private func maximizeTapped() { onMaximize?() }
     @objc private func deleteTapped() { onDelete?() }
 
     func textFieldShouldReturn(_ textField: UITextField) -> Bool {
@@ -409,7 +431,7 @@ final class SpaceViewController: UIViewController {
     private let sceneryView = UIView()
     private let gridLayer = CAShapeLayer()
     private let starLayer = CAShapeLayer()
-    private let worldView = UIView()
+    private let worldView = PassthroughView()
     private let touchView = UIView()
     private let reticle = UIView()
     private let backdrop = CAGradientLayer()
@@ -430,6 +452,9 @@ final class SpaceViewController: UIViewController {
     private var pinchTarget: MonitorView?
     private var stickGrabOffset = CGPoint.zero
     private let themeKey = "kukan.theme.v1"
+    private let touchKey = "kukan.directtouch.v1"
+    private var directTouch = false          // true: 空間内のモニターをそのままタッチ操作する
+    private var touchModeButton: UIButton?
     private let toastLabel = UILabel()
     private let focusDim = UIView()
     private var arButton: UIButton?
@@ -464,6 +489,7 @@ final class SpaceViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         Palette.index = UserDefaults.standard.integer(forKey: themeKey)
+        directTouch = UserDefaults.standard.bool(forKey: touchKey)
         view.backgroundColor = .black
         view.layer.insertSublayer(backdrop, at: 0)
 
@@ -478,10 +504,10 @@ final class SpaceViewController: UIViewController {
         sceneryView.layer.addSublayer(starLayer)
         view.addSubview(sceneryView)
 
-        worldView.isUserInteractionEnabled = false
-        view.addSubview(worldView)
 
+        // 何もない所へのタッチは touchView、モニターへのタッチは上に重ねた worldView が受ける
         view.addSubview(touchView)
+        view.addSubview(worldView)
         touchView.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(handleTap(_:))))
         touchView.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:))))
         let hold = UILongPressGestureRecognizer(target: self, action: #selector(handleHold(_:)))
@@ -520,6 +546,9 @@ final class SpaceViewController: UIViewController {
         let lookB = makeHUDButton("視点スティック：表示中", primary: false, action: #selector(toggleLookStick))
         lookStickButton = lookB
         rowS.addArrangedSubview(lookB)
+        let touchB = makeHUDButton("画面操作：最大化", primary: false, action: #selector(toggleTouchMode))
+        touchModeButton = touchB
+        rowS.addArrangedSubview(touchB)
 
         let row2 = UIStackView()
         row2.axis = .horizontal
@@ -574,6 +603,7 @@ final class SpaceViewController: UIViewController {
         makeStars()
         loadMonitors()
         applyTheme()
+        updateTouchModeUI()
 
         if motion.isDeviceMotionAvailable {
             motion.deviceMotionUpdateInterval = 1.0 / 60.0
@@ -640,6 +670,28 @@ final class SpaceViewController: UIViewController {
         Palette.index = (Palette.index + 1) % Palette.themes.count
         UserDefaults.standard.set(Palette.index, forKey: themeKey)
         applyTheme()
+    }
+
+    // MARK: 画面操作の設定
+
+    @objc private func toggleTouchMode() {
+        directTouch.toggle()
+        UserDefaults.standard.set(directTouch, forKey: touchKey)
+        view.endEditing(true)
+        for mv in monitors where mv !== focused {
+            mv.setPresentation(directTouch ? .spaceLive : .spaceLocked)
+        }
+        updateTouchModeUI()
+        showToast(directTouch
+                  ? "空間のモニターに直接タッチして操作できます。"
+                  : "モニターをタップすると、手元に大きく開いて操作できます。")
+    }
+
+    private func updateTouchModeUI() {
+        setTitle(touchModeButton, directTouch ? "画面操作：空間で直接" : "画面操作：最大化")
+        helpLabel.text = directTouch
+            ? "モニターに直接タッチして操作 ／ 何もない所を長押し：照準のモニターを移動 ／ ピンチ：大きさ変更"
+            : "動かして見回す ／ タップで開く ／ 長押しでモニター移動 ／ ピンチで大きさ変更"
     }
 
     // MARK: 丸いボタンと視点スティック
@@ -1087,6 +1139,11 @@ final class SpaceViewController: UIViewController {
 
     @objc private func handleTap(_ g: UITapGestureRecognizer) {
         if focused != nil { return }
+        if directTouch {
+            // 直接操作の設定では、何もない所のタップはキーボードを閉じるだけ
+            view.endEditing(true)
+            return
+        }
         let target = monitor(alongRay: ray(through: g.location(in: view))) ?? gazed
         if let mv = target { focus(mv) }
     }
@@ -1146,7 +1203,7 @@ final class SpaceViewController: UIViewController {
         // 文字入力を受け取れるよう、このウィンドウを入力先にする
         view.window?.makeKey()
         mv.frame = focusFrame()
-        mv.setFocused(true)
+        mv.setPresentation(.maximized)
         mv.alpha = 0
         UIView.animate(withDuration: 0.2) { mv.alpha = 1 }
     }
@@ -1154,7 +1211,7 @@ final class SpaceViewController: UIViewController {
     private func unfocus() {
         guard let mv = focused else { return }
         mv.endEditing(true)
-        mv.setFocused(false)
+        mv.setPresentation(directTouch ? .spaceLive : .spaceLocked)
         mv.setHighlighted(false)
         mv.removeFromSuperview()
         focused = nil
@@ -1178,6 +1235,11 @@ final class SpaceViewController: UIViewController {
         let mv = MonitorView(url: url, yaw: yaw, pitch: pitch)
         mv.applyTheme()
         mv.onClose = { [weak self] in self?.unfocus() }
+        mv.onMaximize = { [weak self, weak mv] in
+            guard let self = self, let mv = mv, self.focused == nil else { return }
+            self.focus(mv)
+        }
+        mv.setPresentation(directTouch ? .spaceLive : .spaceLocked)
         mv.onDelete = { [weak self, weak mv] in
             guard let self = self, let mv = mv else { return }
             self.remove(mv)
