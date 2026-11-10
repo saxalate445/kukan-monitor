@@ -74,16 +74,128 @@ struct SavedMonitor: Codable {
     var url: String
     var yaw: Double
     var pitch: Double
+    var scale: Double?
+}
+
+/// 空間の見た目（テーマ）
+struct Theme {
+    let name: String
+    let top: UIColor
+    let bottom: UIColor
+    let grid: UIColor
+    let star: UIColor
+    let starShape: Int      // 0=丸, 1=ひし形, 2=ハート
+    let panel: UIColor
+    let edge: UIColor
+    let ink: UIColor
+    let text: UIColor
+    let accent: UIColor
+    let accentInk: UIColor
 }
 
 @MainActor
 enum Palette {
-    static let void = UIColor(red: 0.047, green: 0.071, blue: 0.149, alpha: 1)
-    static let panel = UIColor(red: 0.078, green: 0.114, blue: 0.227, alpha: 1)
-    static let edge = UIColor(red: 0.59, green: 0.67, blue: 0.92, alpha: 0.45)
-    static let ink = UIColor(red: 0.91, green: 0.93, blue: 0.98, alpha: 1)
-    static let mute = UIColor(red: 0.58, green: 0.64, blue: 0.78, alpha: 1)
-    static let accent = UIColor(red: 1.0, green: 0.706, blue: 0.33, alpha: 1)
+    static let themes: [Theme] = [
+        Theme(name: "夜空",
+              top: UIColor(red: 0.047, green: 0.071, blue: 0.149, alpha: 1),
+              bottom: UIColor(red: 0.10, green: 0.14, blue: 0.28, alpha: 1),
+              grid: UIColor(red: 0.5, green: 0.61, blue: 0.94, alpha: 0.38),
+              star: UIColor(white: 1, alpha: 0.7), starShape: 0,
+              panel: UIColor(red: 0.078, green: 0.114, blue: 0.227, alpha: 1),
+              edge: UIColor(red: 0.59, green: 0.67, blue: 0.92, alpha: 0.45),
+              ink: UIColor(red: 0.91, green: 0.93, blue: 0.98, alpha: 1),
+              text: UIColor(red: 0.70, green: 0.75, blue: 0.88, alpha: 1),
+              accent: UIColor(red: 1.0, green: 0.706, blue: 0.33, alpha: 1),
+              accentInk: UIColor(red: 0.16, green: 0.10, blue: 0.01, alpha: 1)),
+        Theme(name: "クール",
+              top: UIColor(red: 0.02, green: 0.17, blue: 0.27, alpha: 1),
+              bottom: UIColor(red: 0.16, green: 0.62, blue: 0.80, alpha: 1),
+              grid: UIColor(red: 0.70, green: 0.97, blue: 1.0, alpha: 0.55),
+              star: UIColor(red: 0.80, green: 0.98, blue: 1.0, alpha: 0.85), starShape: 1,
+              panel: UIColor(red: 0.03, green: 0.16, blue: 0.24, alpha: 1),
+              edge: UIColor(red: 0.55, green: 0.90, blue: 1.0, alpha: 0.55),
+              ink: UIColor(red: 0.90, green: 0.98, blue: 1.0, alpha: 1),
+              text: UIColor(red: 0.88, green: 0.97, blue: 1.0, alpha: 1),
+              accent: UIColor(red: 0.36, green: 0.93, blue: 1.0, alpha: 1),
+              accentInk: UIColor(red: 0.01, green: 0.15, blue: 0.20, alpha: 1)),
+        Theme(name: "キュート",
+              top: UIColor(red: 1.0, green: 0.84, blue: 0.91, alpha: 1),
+              bottom: UIColor(red: 1.0, green: 0.62, blue: 0.79, alpha: 1),
+              grid: UIColor(white: 1, alpha: 0.7),
+              star: UIColor(white: 1, alpha: 0.9), starShape: 2,
+              panel: UIColor(red: 0.52, green: 0.15, blue: 0.34, alpha: 1),
+              edge: UIColor(white: 1, alpha: 0.8),
+              ink: UIColor(red: 1.0, green: 0.94, blue: 0.97, alpha: 1),
+              text: UIColor(red: 0.40, green: 0.08, blue: 0.24, alpha: 1),
+              accent: UIColor(red: 1.0, green: 0.30, blue: 0.58, alpha: 1),
+              accentInk: UIColor(white: 1, alpha: 1))
+    ]
+    static var index = 0
+    static var theme: Theme { themes[index % themes.count] }
+    static var panel: UIColor { theme.panel }
+    static var edge: UIColor { theme.edge }
+    static var ink: UIColor { theme.ink }
+    static var mute: UIColor { theme.text }
+    static var accent: UIColor { theme.accent }
+}
+
+// MARK: - 視点スティック（丸い操作パッド）
+
+final class JoystickView: UIView {
+    private let knob = UIView()
+    private(set) var vector = CGPoint.zero   // 各軸 -1...1
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        layer.borderWidth = 2
+        knob.isUserInteractionEnabled = false
+        knob.bounds = CGRect(x: 0, y: 0, width: 48, height: 48)
+        knob.layer.cornerRadius = 24
+        addSubview(knob)
+        applyTheme()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) は使いません")
+    }
+
+    func applyTheme() {
+        backgroundColor = Palette.panel.withAlphaComponent(0.55)
+        layer.borderColor = Palette.edge.cgColor
+        knob.backgroundColor = Palette.accent
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        layer.cornerRadius = bounds.width / 2
+        if vector == .zero { knob.center = CGPoint(x: bounds.midX, y: bounds.midY) }
+    }
+
+    func reset() {
+        vector = .zero
+        knob.center = CGPoint(x: bounds.midX, y: bounds.midY)
+    }
+
+    private func update(_ touches: Set<UITouch>) {
+        guard let t = touches.first else { return }
+        let p = t.location(in: self)
+        let c = CGPoint(x: bounds.midX, y: bounds.midY)
+        var dx = p.x - c.x
+        var dy = p.y - c.y
+        let maxR = max(1, bounds.width / 2 - 24)
+        let len = (dx * dx + dy * dy).squareRoot()
+        if len > maxR {
+            dx *= maxR / len
+            dy *= maxR / len
+        }
+        knob.center = CGPoint(x: c.x + dx, y: c.y + dy)
+        vector = CGPoint(x: dx / maxR, y: dy / maxR)
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) { update(touches) }
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) { update(touches) }
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) { reset() }
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) { reset() }
 }
 
 // MARK: - モニター（ブラウザ1枚）
@@ -94,6 +206,9 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
 
     var yaw: Double
     var pitch: Double
+    var scale: Double = 1
+    private var highlighted = false
+    private var barButtons: [UIButton] = []
     var onClose: (() -> Void)?
     var onDelete: (() -> Void)?
     var onChange: (() -> Void)?
@@ -135,6 +250,8 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
         bar.addArrangedSubview(makeButton(symbol: "chevron.left", title: nil, action: #selector(goBack)))
         bar.addArrangedSubview(makeButton(symbol: "chevron.right", title: nil, action: #selector(goForward)))
         bar.addArrangedSubview(makeButton(symbol: "arrow.clockwise", title: nil, action: #selector(reload)))
+        bar.addArrangedSubview(makeButton(symbol: "minus.magnifyingglass", title: nil, action: #selector(zoomOut)))
+        bar.addArrangedSubview(makeButton(symbol: "plus.magnifyingglass", title: nil, action: #selector(zoomIn)))
 
         field.borderStyle = .roundedRect
         field.font = .systemFont(ofSize: 15)
@@ -151,6 +268,7 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
 
         let close = makeButton(symbol: nil, title: "空間に戻す", action: #selector(closeTapped))
         let delete = makeButton(symbol: nil, title: "削除", action: #selector(deleteTapped))
+        barButtons.removeAll { $0 === delete }
         delete.tintColor = UIColor.systemRed
         bar.addArrangedSubview(close)
         bar.addArrangedSubview(delete)
@@ -176,6 +294,7 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
             b.titleLabel?.font = .systemFont(ofSize: 15, weight: .semibold)
         }
         b.tintColor = Palette.accent
+        barButtons.append(b)
         b.addTarget(self, action: action, for: .touchUpInside)
         b.setContentHuggingPriority(.required, for: .horizontal)
         b.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -191,7 +310,8 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
 
     /// 空間内での位置と向きを反映する
     func place() {
-        var t = CATransform3DMakeTranslation(0, 0, CGFloat(-MonitorView.distance))
+        var t = CATransform3DMakeScale(CGFloat(scale), CGFloat(scale), 1)
+        t = CATransform3DConcat(t, CATransform3DMakeTranslation(0, 0, CGFloat(-MonitorView.distance)))
         t = CATransform3DConcat(t, CATransform3DMakeRotation(CGFloat(pitch), 1, 0, 0))
         t = CATransform3DConcat(t, CATransform3DMakeRotation(CGFloat(yaw), 0, 1, 0))
         layer.transform = t
@@ -205,8 +325,19 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
     }
 
     func setHighlighted(_ on: Bool) {
+        highlighted = on
         layer.borderColor = (on ? Palette.accent : Palette.edge).cgColor
     }
+
+    func applyTheme() {
+        backgroundColor = Palette.panel
+        setHighlighted(highlighted)
+        for b in barButtons { b.tintColor = Palette.accent }
+    }
+
+    /// ページの表示倍率（手元に開いているときのボタン用）
+    @objc private func zoomIn() { web.pageZoom = min(3.0, web.pageZoom + 0.15) }
+    @objc private func zoomOut() { web.pageZoom = max(0.5, web.pageZoom - 0.15) }
 
     var currentURLString: String {
         (web.url ?? homeURL).absoluteString
@@ -273,8 +404,20 @@ final class SpaceViewController: UIViewController {
     private let worldView = UIView()
     private let touchView = UIView()
     private let reticle = UIView()
+    private let backdrop = CAGradientLayer()
     private let helpLabel = UILabel()
     private let buttonRow = UIStackView()
+    private let menuButton = UIButton(type: .system)
+    private let joystick = JoystickView(frame: CGRect(x: 0, y: 0, width: 120, height: 120))
+    private var hudButtons: [(button: UIButton, primary: Bool)] = []
+    private var themeButton: UIButton?
+    private var stickButton: UIButton?
+    private var menuOpen = true
+    private var floatingPlaced = false
+    private var pitchOffset = 0.0
+    private var pinchTarget: MonitorView?
+    private var stickGrabOffset = CGPoint.zero
+    private let themeKey = "kukan.theme.v1"
     private let toastLabel = UILabel()
     private let focusDim = UIView()
     private var arButton: UIButton?
@@ -308,16 +451,16 @@ final class SpaceViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = Palette.void
+        Palette.index = UserDefaults.standard.integer(forKey: themeKey)
+        view.backgroundColor = .black
+        view.layer.insertSublayer(backdrop, at: 0)
 
         cameraView.isHidden = true
         cameraView.backgroundColor = .black
         view.addSubview(cameraView)
 
         gridLayer.fillColor = nil
-        gridLayer.strokeColor = UIColor(red: 0.5, green: 0.61, blue: 0.94, alpha: 0.38).cgColor
         gridLayer.lineWidth = 1
-        starLayer.fillColor = UIColor(white: 1, alpha: 0.7).cgColor
         sceneryView.isUserInteractionEnabled = false
         sceneryView.layer.addSublayer(gridLayer)
         sceneryView.layer.addSublayer(starLayer)
@@ -332,38 +475,70 @@ final class SpaceViewController: UIViewController {
         let hold = UILongPressGestureRecognizer(target: self, action: #selector(handleHold(_:)))
         hold.minimumPressDuration = 0.45
         touchView.addGestureRecognizer(hold)
+        touchView.addGestureRecognizer(UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:))))
 
         reticle.isUserInteractionEnabled = false
         reticle.layer.borderWidth = 2
-        reticle.layer.borderColor = Palette.ink.cgColor
         reticle.layer.cornerRadius = 13
         view.addSubview(reticle)
 
-        helpLabel.text = "iPadを動かして見回す ／ モニターをタップで手元に開く ／ 長押ししたまま動かすと移動"
-        helpLabel.font = .systemFont(ofSize: 13)
-        helpLabel.textColor = Palette.mute
+        helpLabel.text = "動かして見回す ／ タップで開く ／ 長押しで移動 ／ ピンチで大きさ変更"
+        helpLabel.font = .systemFont(ofSize: 13, weight: .medium)
         helpLabel.textAlignment = .center
-        helpLabel.numberOfLines = 2
-        view.addSubview(helpLabel)
+        helpLabel.adjustsFontSizeToFitWidth = true
+        helpLabel.minimumScaleFactor = 0.6
 
-        buttonRow.axis = .horizontal
-        buttonRow.spacing = 10
-        buttonRow.addArrangedSubview(makeHUDButton("モニターを追加", primary: true, action: #selector(addMonitor)))
+        let row1 = UIStackView()
+        row1.axis = .horizontal
+        row1.spacing = 10
+        row1.addArrangedSubview(makeHUDButton("モニターを追加", primary: true, action: #selector(addMonitor)))
         let ar = makeHUDButton("ARに切り替え", primary: false, action: #selector(toggleAR))
         arButton = ar
-        buttonRow.addArrangedSubview(ar)
-        buttonRow.addArrangedSubview(makeHUDButton("正面リセット", primary: false, action: #selector(recenter)))
-        buttonRow.addArrangedSubview(makeHUDButton("配置リセット", primary: false, action: #selector(resetLayout)))
+        row1.addArrangedSubview(ar)
+        let theme = makeHUDButton("空間：" + Palette.theme.name, primary: false, action: #selector(nextTheme))
+        themeButton = theme
+        row1.addArrangedSubview(theme)
+        let stick = makeHUDButton("視点スティックを隠す", primary: false, action: #selector(toggleStick))
+        stickButton = stick
+        row1.addArrangedSubview(stick)
+
+        let row2 = UIStackView()
+        row2.axis = .horizontal
+        row2.spacing = 10
+        row2.addArrangedSubview(makeHUDButton("拡大", primary: false, action: #selector(enlargeGazed)))
+        row2.addArrangedSubview(makeHUDButton("縮小", primary: false, action: #selector(shrinkGazed)))
+        row2.addArrangedSubview(makeHUDButton("正面リセット", primary: false, action: #selector(recenter)))
+        row2.addArrangedSubview(makeHUDButton("配置リセット", primary: false, action: #selector(resetLayout)))
+
+        buttonRow.axis = .vertical
+        buttonRow.alignment = .center
+        buttonRow.spacing = 8
+        buttonRow.addArrangedSubview(helpLabel)
+        buttonRow.addArrangedSubview(row1)
+        buttonRow.addArrangedSubview(row2)
         view.addSubview(buttonRow)
 
+        // 視点スティック：動かすと視点が回る。長押しすると位置を移動できる。
+        let stickMove = UILongPressGestureRecognizer(target: self, action: #selector(moveStick(_:)))
+        stickMove.minimumPressDuration = 0.4
+        stickMove.allowableMovement = 8
+        joystick.addGestureRecognizer(stickMove)
+        view.addSubview(joystick)
+
+        // 丸いメニューボタン：タップでメニューの表示/非表示、ドラッグで移動。
+        menuButton.setImage(UIImage(systemName: "line.3.horizontal"), for: .normal)
+        menuButton.bounds = CGRect(x: 0, y: 0, width: 58, height: 58)
+        menuButton.layer.cornerRadius = 29
+        menuButton.layer.borderWidth = 2
+        menuButton.addTarget(self, action: #selector(toggleMenu), for: .touchUpInside)
+        menuButton.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(moveMenuButton(_:))))
+        view.addSubview(menuButton)
+
         toastLabel.font = .systemFont(ofSize: 14, weight: .medium)
-        toastLabel.textColor = Palette.ink
-        toastLabel.backgroundColor = Palette.panel
         toastLabel.textAlignment = .center
         toastLabel.numberOfLines = 0
         toastLabel.layer.cornerRadius = 10
         toastLabel.layer.borderWidth = 1
-        toastLabel.layer.borderColor = Palette.accent.cgColor
         toastLabel.clipsToBounds = true
         toastLabel.isHidden = true
         toastLabel.isUserInteractionEnabled = false
@@ -376,6 +551,7 @@ final class SpaceViewController: UIViewController {
 
         makeStars()
         loadMonitors()
+        applyTheme()
 
         if motion.isDeviceMotionAvailable {
             motion.deviceMotionUpdateInterval = 1.0 / 60.0
@@ -398,12 +574,127 @@ final class SpaceViewController: UIViewController {
         var config = primary ? UIButton.Configuration.filled() : UIButton.Configuration.gray()
         config.title = title
         config.cornerStyle = .capsule
-        config.baseBackgroundColor = primary ? Palette.accent : Palette.panel
-        config.baseForegroundColor = primary ? UIColor(red: 0.16, green: 0.1, blue: 0.01, alpha: 1) : Palette.ink
         config.contentInsets = NSDirectionalEdgeInsets(top: 10, leading: 16, bottom: 10, trailing: 16)
         let b = UIButton(configuration: config)
         b.addTarget(self, action: action, for: .touchUpInside)
+        hudButtons.append((button: b, primary: primary))
         return b
+    }
+
+    private func setTitle(_ button: UIButton?, _ title: String) {
+        var config = button?.configuration
+        config?.title = title
+        button?.configuration = config
+    }
+
+    // MARK: テーマ
+
+    private func applyTheme() {
+        let t = Palette.theme
+        backdrop.colors = [t.top.cgColor, t.bottom.cgColor]
+        gridLayer.strokeColor = t.grid.cgColor
+        starLayer.fillColor = t.star.cgColor
+        helpLabel.textColor = t.text
+        reticle.layer.borderColor = (gazed == nil ? t.text : t.accent).cgColor
+        toastLabel.textColor = t.ink
+        toastLabel.backgroundColor = t.panel
+        toastLabel.layer.borderColor = t.accent.cgColor
+        menuButton.backgroundColor = t.panel.withAlphaComponent(0.85)
+        menuButton.tintColor = t.accent
+        menuButton.layer.borderColor = t.edge.cgColor
+        joystick.applyTheme()
+        for item in hudButtons {
+            var config = item.button.configuration
+            config?.baseBackgroundColor = item.primary ? t.accent : t.panel
+            config?.baseForegroundColor = item.primary ? t.accentInk : t.ink
+            item.button.configuration = config
+        }
+        for mv in monitors { mv.applyTheme() }
+        setTitle(themeButton, "空間：" + t.name)
+    }
+
+    @objc private func nextTheme() {
+        Palette.index = (Palette.index + 1) % Palette.themes.count
+        UserDefaults.standard.set(Palette.index, forKey: themeKey)
+        applyTheme()
+    }
+
+    // MARK: 丸いボタンと視点スティック
+
+    @objc private func toggleMenu() {
+        menuOpen.toggle()
+        buttonRow.isHidden = !menuOpen
+    }
+
+    @objc private func toggleStick() {
+        joystick.isHidden.toggle()
+        joystick.reset()
+        setTitle(stickButton, joystick.isHidden ? "視点スティックを出す" : "視点スティックを隠す")
+    }
+
+    @objc private func moveMenuButton(_ g: UIPanGestureRecognizer) {
+        let d = g.translation(in: view)
+        g.setTranslation(.zero, in: view)
+        menuButton.center = clamped(CGPoint(x: menuButton.center.x + d.x, y: menuButton.center.y + d.y), half: 29)
+    }
+
+    @objc private func moveStick(_ g: UILongPressGestureRecognizer) {
+        let p = g.location(in: view)
+        switch g.state {
+        case .began:
+            joystick.reset()
+            stickGrabOffset = CGPoint(x: joystick.center.x - p.x, y: joystick.center.y - p.y)
+            joystick.alpha = 0.6
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        case .changed:
+            joystick.center = clamped(CGPoint(x: p.x + stickGrabOffset.x, y: p.y + stickGrabOffset.y), half: 60)
+        default:
+            joystick.alpha = 1
+            joystick.reset()
+        }
+    }
+
+    /// 画面の外に出ないように位置を丸める
+    private func clamped(_ p: CGPoint, half: CGFloat) -> CGPoint {
+        let b = view.bounds
+        let safe = view.safeAreaInsets
+        let minX = safe.left + half + 6, maxX = b.width - safe.right - half - 6
+        let minY = safe.top + half + 6, maxY = b.height - safe.bottom - half - 6
+        return CGPoint(x: min(max(p.x, minX), max(minX, maxX)), y: min(max(p.y, minY), max(minY, maxY)))
+    }
+
+    // MARK: モニターの大きさ
+
+    private func setScale(_ mv: MonitorView, _ value: Double) {
+        mv.scale = min(2.0, max(0.5, value))
+        mv.place()
+    }
+
+    @objc private func enlargeGazed() { stepScale(1.2) }
+    @objc private func shrinkGazed() { stepScale(1 / 1.2) }
+
+    private func stepScale(_ factor: Double) {
+        guard let mv = gazed else {
+            showToast("大きさを変えたいモニターに、中央の照準を合わせてください。")
+            return
+        }
+        setScale(mv, mv.scale * factor)
+        saveMonitors()
+    }
+
+    @objc private func handlePinch(_ g: UIPinchGestureRecognizer) {
+        switch g.state {
+        case .began:
+            pinchTarget = focused == nil ? (monitor(alongRay: ray(through: g.location(in: view))) ?? gazed) : nil
+        case .changed:
+            if let mv = pinchTarget {
+                setScale(mv, mv.scale * Double(g.scale))
+                g.scale = 1
+            }
+        default:
+            if pinchTarget != nil { saveMonitors() }
+            pinchTarget = nil
+        }
     }
 
     // MARK: レイアウト
@@ -413,6 +704,10 @@ final class SpaceViewController: UIViewController {
         let b = view.bounds
         perspective = 0.6 * Double((b.width * b.height).squareRoot())
 
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        backdrop.frame = b
+        CATransaction.commit()
         cameraView.frame = b
         previewLayer?.frame = b
         updatePreviewOrientation()
@@ -426,10 +721,17 @@ final class SpaceViewController: UIViewController {
         reticle.center = CGPoint(x: b.midX, y: b.midY)
 
         let safe = view.safeAreaInsets
-        let rowSize = buttonRow.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
+        let fit = buttonRow.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
+        let rowSize = CGSize(width: min(fit.width, b.width - 24), height: fit.height)
         let rowY = b.height - safe.bottom - 16 - rowSize.height
         buttonRow.frame = CGRect(x: (b.width - rowSize.width) / 2, y: rowY, width: rowSize.width, height: rowSize.height)
-        helpLabel.frame = CGRect(x: 16, y: rowY - 44, width: b.width - 32, height: 36)
+        if !floatingPlaced && b.width > 0 {
+            floatingPlaced = true
+            menuButton.center = CGPoint(x: safe.left + 50, y: b.height - safe.bottom - 50)
+            joystick.center = CGPoint(x: b.width - safe.right - 84, y: b.height - safe.bottom - 190)
+        }
+        menuButton.center = clamped(menuButton.center, half: 29)
+        joystick.center = clamped(joystick.center, half: 60)
         toastLabel.frame = CGRect(x: max(16, (b.width - 520) / 2), y: safe.top + 16, width: min(520, b.width - 32), height: 56)
 
         let center = CGPoint(x: b.midX, y: b.midY)
@@ -481,7 +783,7 @@ final class SpaceViewController: UIViewController {
             yawOffset = -atan2(device.r[0][2], device.r[2][2])
             needsRecenter = false
         }
-        return Mat3.rotY(yawOffset) * device
+        return Mat3.rotY(yawOffset) * device * Mat3.rotX(pitchOffset)
     }
 
     private func direction(yaw a: Double, pitch b: Double) -> Vec3 {
@@ -489,6 +791,18 @@ final class SpaceViewController: UIViewController {
     }
 
     @objc private func tick() {
+        // 視点スティック：倒した方向へ視点を回す
+        let stick = joystick.vector
+        if !joystick.isHidden && focused == nil && (stick.x != 0 || stick.y != 0) {
+            let step = 1.4 * (link?.duration ?? 1.0 / 60.0)
+            if motion.deviceMotion != nil {
+                yawOffset -= Double(stick.x) * step
+                pitchOffset = max(-1.3, min(1.3, pitchOffset - Double(stick.y) * step))
+            } else {
+                dragYaw -= Double(stick.x) * step
+                dragPitch = max(-1.4, min(1.4, dragPitch - Double(stick.y) * step))
+            }
+        }
         let R = cameraRotation()
         let s = [1.0, -1.0, 1.0]
         var v = Mat3.identity
@@ -520,7 +834,9 @@ final class SpaceViewController: UIViewController {
         }
         for mv in monitors where mv !== focused {
             // 視点の後ろ側に回ったモニターは描かない
-            mv.isHidden = gazeDir.dot(direction(yaw: mv.yaw, pitch: mv.pitch)) < 0.2
+            let halfAngle = atan(450.0 * mv.scale / MonitorView.distance)
+            let limit = min(88.0 * Double.pi / 180, 55.0 * Double.pi / 180 + halfAngle)
+            mv.isHidden = gazeDir.dot(direction(yaw: mv.yaw, pitch: mv.pitch)) < cos(limit)
         }
         if focused == nil && grabbed == nil {
             let hit = monitor(alongRay: gazeDir)
@@ -528,7 +844,7 @@ final class SpaceViewController: UIViewController {
                 gazed?.setHighlighted(false)
                 hit?.setHighlighted(true)
                 gazed = hit
-                reticle.layer.borderColor = (hit == nil ? Palette.ink : Palette.accent).cgColor
+                reticle.layer.borderColor = (hit == nil ? Palette.mute : Palette.accent).cgColor
             }
         }
         drawScenery()
@@ -539,10 +855,11 @@ final class SpaceViewController: UIViewController {
     private func monitor(alongRay d: Vec3) -> MonitorView? {
         var best: MonitorView?
         var bestT = Double.greatestFiniteMagnitude
-        let halfW = Double(MonitorView.spaceSize.width) / 2
-        let halfH = Double(MonitorView.spaceSize.height) / 2
+        let baseW = Double(MonitorView.spaceSize.width) / 2
+        let baseH = Double(MonitorView.spaceSize.height) / 2
         for mv in monitors where mv !== focused {
             let a = mv.yaw, b = mv.pitch
+            let halfW = baseW * mv.scale, halfH = baseH * mv.scale
             let n = direction(yaw: a, pitch: b)
             let k = d.dot(n)
             if k < 0.05 { continue }
@@ -623,7 +940,31 @@ final class SpaceViewController: UIViewController {
             if c.z > -100 { continue }
             let p = proj(c)
             let size = CGFloat(2 + (i % 3))
-            dots.addEllipse(in: CGRect(x: p.x - size / 2, y: p.y - size / 2, width: size, height: size))
+            switch Palette.theme.starShape {
+            case 1:
+                let r = size * 1.6
+                dots.move(to: CGPoint(x: p.x, y: p.y - r))
+                dots.addLine(to: CGPoint(x: p.x + r * 0.6, y: p.y))
+                dots.addLine(to: CGPoint(x: p.x, y: p.y + r))
+                dots.addLine(to: CGPoint(x: p.x - r * 0.6, y: p.y))
+                dots.closeSubpath()
+            case 2:
+                let r = size * 2.2
+                dots.move(to: CGPoint(x: p.x, y: p.y + r * 0.9))
+                dots.addCurve(to: CGPoint(x: p.x - r, y: p.y - r * 0.2),
+                              control1: CGPoint(x: p.x - r * 0.6, y: p.y + r * 0.5),
+                              control2: CGPoint(x: p.x - r, y: p.y + r * 0.2))
+                dots.addArc(center: CGPoint(x: p.x - r * 0.5, y: p.y - r * 0.2), radius: r * 0.5,
+                            startAngle: .pi, endAngle: 0, clockwise: false)
+                dots.addArc(center: CGPoint(x: p.x + r * 0.5, y: p.y - r * 0.2), radius: r * 0.5,
+                            startAngle: .pi, endAngle: 0, clockwise: false)
+                dots.addCurve(to: CGPoint(x: p.x, y: p.y + r * 0.9),
+                              control1: CGPoint(x: p.x + r, y: p.y + r * 0.2),
+                              control2: CGPoint(x: p.x + r * 0.6, y: p.y + r * 0.5))
+                dots.closeSubpath()
+            default:
+                dots.addEllipse(in: CGRect(x: p.x - size / 2, y: p.y - size / 2, width: size, height: size))
+            }
         }
         starLayer.path = dots
     }
@@ -684,8 +1025,11 @@ final class SpaceViewController: UIViewController {
         mv.setHighlighted(true)
         focusDim.isHidden = false
         reticle.isHidden = true
+        joystick.reset()
         view.bringSubviewToFront(focusDim)
         view.addSubview(mv)
+        // 文字入力を受け取れるよう、このウィンドウを入力先にする
+        view.window?.makeKey()
         mv.frame = focusFrame()
         mv.setFocused(true)
         mv.alpha = 0
@@ -717,6 +1061,7 @@ final class SpaceViewController: UIViewController {
 
     private func makeMonitor(url: URL, yaw: Double, pitch: Double) -> MonitorView {
         let mv = MonitorView(url: url, yaw: yaw, pitch: pitch)
+        mv.applyTheme()
         mv.onClose = { [weak self] in self?.unfocus() }
         mv.onDelete = { [weak self, weak mv] in
             guard let self = self, let mv = mv else { return }
@@ -761,6 +1106,7 @@ final class SpaceViewController: UIViewController {
             dragYaw = 0
             dragPitch = 0
         }
+        pitchOffset = 0
     }
 
     @objc private func resetLayout() {
@@ -770,10 +1116,12 @@ final class SpaceViewController: UIViewController {
         for (i, mv) in lower.enumerated() {
             mv.yaw = (Double(i) - Double(lower.count - 1) / 2) * 42 * deg * -1
             mv.pitch = 0
+            mv.scale = 1
         }
         for (i, mv) in upper.enumerated() {
             mv.yaw = (Double(i) - Double(upper.count - 1) / 2) * 42 * deg * -1
             mv.pitch = -32 * deg
+            mv.scale = 1
         }
         for mv in monitors where mv !== focused { mv.place() }
         saveMonitors()
@@ -788,20 +1136,22 @@ final class SpaceViewController: UIViewController {
         if saved.isEmpty {
             let deg = Double.pi / 180
             saved = [
-                SavedMonitor(url: "https://www.youtube.com/", yaw: 0, pitch: 0),
-                SavedMonitor(url: "https://ja.wikipedia.org/", yaw: -42 * deg, pitch: 0),
-                SavedMonitor(url: "https://www.google.com/", yaw: 42 * deg, pitch: 0)
+                SavedMonitor(url: "https://www.youtube.com/", yaw: 0, pitch: 0, scale: 1),
+                SavedMonitor(url: "https://ja.wikipedia.org/", yaw: -42 * deg, pitch: 0, scale: 1),
+                SavedMonitor(url: "https://www.google.com/", yaw: 42 * deg, pitch: 0, scale: 1)
             ]
         }
         for s in saved.prefix(maxMonitors) {
             if let url = URL(string: s.url) {
-                _ = makeMonitor(url: url, yaw: s.yaw, pitch: s.pitch)
+                let mv = makeMonitor(url: url, yaw: s.yaw, pitch: s.pitch)
+                mv.scale = min(2.0, max(0.5, s.scale ?? 1))
+                mv.place()
             }
         }
     }
 
     private func saveMonitors() {
-        let list = monitors.map { SavedMonitor(url: $0.currentURLString, yaw: $0.yaw, pitch: $0.pitch) }
+        let list = monitors.map { SavedMonitor(url: $0.currentURLString, yaw: $0.yaw, pitch: $0.pitch, scale: $0.scale) }
         if let data = try? JSONEncoder().encode(list) {
             UserDefaults.standard.set(data, forKey: saveKey)
         }
@@ -856,9 +1206,8 @@ final class SpaceViewController: UIViewController {
     }
 
     private func setARTitle() {
-        var config = arButton?.configuration
-        config?.title = arOn ? "VRに戻す" : "ARに切り替え"
-        arButton?.configuration = config
+        backdrop.isHidden = arOn
+        setTitle(arButton, arOn ? "VRに戻す" : "ARに切り替え")
     }
 
     private func updatePreviewOrientation() {
