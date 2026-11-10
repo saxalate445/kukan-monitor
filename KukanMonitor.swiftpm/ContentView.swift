@@ -360,13 +360,13 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
         layer.transform = t
     }
 
-    func setPresentation(_ p: MonitorPresentation) {
+    func setPresentation(_ p: MonitorPresentation, keepEditing: Bool = false) {
         isUserInteractionEnabled = p != .spaceLocked
         maximizeButton?.isHidden = p != .spaceLive
         shapeButton?.isHidden = p != .spaceLive
         closeButton?.isHidden = p != .maximized
         deleteButton?.isHidden = p != .maximized
-        if p == .spaceLocked { endEditing(true) }
+        if p == .spaceLocked && !keepEditing { endEditing(true) }
     }
 
     func setHighlighted(_ on: Bool) {
@@ -472,6 +472,12 @@ final class SpaceViewController: UIViewController {
     private let touchKey = "kukan.directtouch.v1"
     private var directTouch = false          // true: 空間内のモニターをそのままタッチ操作する
     private var touchModeButton: UIButton?
+    private var active: MonitorView?         // 直接操作の設定で、いまタッチに反応するモニター
+
+    /// 拡大縮小・形の変更・移動の対象。照準が乗っているモニター（直接操作の設定では、なければ操作中のモニター）。
+    private var currentTarget: MonitorView? {
+        gazed ?? (directTouch ? active : nil)
+    }
     private let toastLabel = UILabel()
     private let focusDim = UIView()
     private var arButton: UIButton?
@@ -697,19 +703,40 @@ final class SpaceViewController: UIViewController {
         UserDefaults.standard.set(directTouch, forKey: touchKey)
         view.endEditing(true)
         for mv in monitors where mv !== focused {
-            mv.setPresentation(directTouch ? .spaceLive : .spaceLocked)
+            mv.setPresentation(.spaceLocked)
         }
+        active = nil
+        if directTouch, let mv = gazed { setActive(mv) }
+        refreshHighlights()
         updateTouchModeUI()
         showToast(directTouch
-                  ? "空間のモニターに直接タッチして操作できます。"
-                  : "モニターをタップすると、手元に大きく開いて操作できます。")
+                  ? "照準を合わせたモニター（色付きの枠）だけ、直接タッチして操作できます。"
+                  : "照準を合わせて画面のどこかをタップすると、手元に大きく開きます。")
     }
 
     private func updateTouchModeUI() {
         setTitle(touchModeButton, directTouch ? "画面操作：空間で直接" : "画面操作：最大化")
         helpLabel.text = directTouch
-            ? "モニターに直接タッチして操作 ／ 何もない所を長押し：照準のモニターを移動 ／ ピンチ：大きさ変更"
-            : "動かして見回す ／ タップで開く ／ 長押しでモニター移動 ／ ピンチで大きさ変更"
+            ? "照準を合わせたモニター（色付きの枠）だけタッチ操作できる ／ 枠の外を長押し：移動 ／ 枠の外でピンチ：大きさ変更"
+            : "照準をモニターに合わせる ／ どこでもタップ：開く ／ 長押し：移動 ／ ピンチ：大きさ変更"
+    }
+
+    /// 直接操作の設定で、タッチに反応するモニターを切り替える（反応するのは常に1枚だけ）
+    private func setActive(_ mv: MonitorView) {
+        if active === mv { return }
+        if let old = active, old !== focused {
+            // 入力中の文字が消えないよう、キーボードは閉じない
+            old.setPresentation(.spaceLocked, keepEditing: true)
+        }
+        active = mv
+        if mv !== focused { mv.setPresentation(.spaceLive) }
+    }
+
+    /// 枠の色を付け直す：照準が乗っているモニターと、直接操作の対象を目立たせる
+    private func refreshHighlights() {
+        for mv in monitors where mv !== focused && mv !== grabbed {
+            mv.setHighlighted(mv === gazed || (directTouch && mv === active))
+        }
     }
 
     // MARK: 丸いボタンと視点スティック
@@ -787,7 +814,7 @@ final class SpaceViewController: UIViewController {
     }
 
     @objc private func changeGazedShape() {
-        guard let mv = gazed else {
+        guard let mv = currentTarget else {
             showToast("形を変えたいモニターに、中央の照準を合わせてください。")
             return
         }
@@ -798,7 +825,7 @@ final class SpaceViewController: UIViewController {
     @objc private func shrinkGazed() { stepScale(1 / 1.2) }
 
     private func stepScale(_ factor: Double) {
-        guard let mv = gazed else {
+        guard let mv = currentTarget else {
             showToast("大きさを変えたいモニターに、中央の照準を合わせてください。")
             return
         }
@@ -809,7 +836,7 @@ final class SpaceViewController: UIViewController {
     @objc private func handlePinch(_ g: UIPinchGestureRecognizer) {
         switch g.state {
         case .began:
-            pinchTarget = focused == nil ? (monitor(alongRay: ray(through: g.location(in: view))) ?? gazed) : nil
+            pinchTarget = focused == nil ? currentTarget : nil
         case .changed:
             if let mv = pinchTarget {
                 setScale(mv, mv.scale * Double(g.scale))
@@ -991,10 +1018,10 @@ final class SpaceViewController: UIViewController {
         if focused == nil && grabbed == nil {
             let hit = monitor(alongRay: gazeDir)
             if hit !== gazed {
-                gazed?.setHighlighted(false)
-                hit?.setHighlighted(true)
                 gazed = hit
                 reticle.layer.borderColor = (hit == nil ? Palette.mute : Palette.accent).cgColor
+                if directTouch, let h = hit { setActive(h) }
+                refreshHighlights()
             }
         }
         drawScenery()
@@ -1180,8 +1207,8 @@ final class SpaceViewController: UIViewController {
             view.endEditing(true)
             return
         }
-        let target = monitor(alongRay: ray(through: g.location(in: view))) ?? gazed
-        if let mv = target { focus(mv) }
+        // 指の位置ではなく、中央の照準が乗っているモニターを開く
+        if let mv = gazed { focus(mv) }
     }
 
     @objc private func handlePan(_ g: UIPanGestureRecognizer) {
@@ -1199,11 +1226,10 @@ final class SpaceViewController: UIViewController {
         switch g.state {
         case .began:
             if focused != nil { return }
-            let target = monitor(alongRay: ray(through: g.location(in: view))) ?? gazed
-            if let mv = target {
+            if let mv = currentTarget {
                 grabbed = mv
-                gazed?.setHighlighted(false)
                 gazed = nil
+                refreshHighlights()
                 mv.setHighlighted(true)
                 mv.layer.borderWidth = 6
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
@@ -1211,8 +1237,8 @@ final class SpaceViewController: UIViewController {
         case .ended, .cancelled, .failed:
             if let mv = grabbed {
                 mv.layer.borderWidth = 3
-                mv.setHighlighted(false)
                 grabbed = nil
+                refreshHighlights()
                 saveMonitors()
             }
         default:
@@ -1247,11 +1273,11 @@ final class SpaceViewController: UIViewController {
     private func unfocus() {
         guard let mv = focused else { return }
         mv.endEditing(true)
-        mv.setPresentation(directTouch ? .spaceLive : .spaceLocked)
-        mv.setHighlighted(false)
+        mv.setPresentation(directTouch && active === mv ? .spaceLive : .spaceLocked)
         mv.removeFromSuperview()
         focused = nil
         attachToWorld(mv)
+        refreshHighlights()
         focusDim.isHidden = true
         reticle.isHidden = false
         saveMonitors()
@@ -1279,7 +1305,7 @@ final class SpaceViewController: UIViewController {
             guard let self = self, let mv = mv, self.focused == nil else { return }
             self.focus(mv)
         }
-        mv.setPresentation(directTouch ? .spaceLive : .spaceLocked)
+        mv.setPresentation(.spaceLocked)
         mv.onDelete = { [weak self, weak mv] in
             guard let self = self, let mv = mv else { return }
             self.remove(mv)
@@ -1296,6 +1322,8 @@ final class SpaceViewController: UIViewController {
             focusDim.isHidden = true
             reticle.isHidden = false
         }
+        if active === mv { active = nil }
+        if gazed === mv { gazed = nil }
         mv.endEditing(true)
         mv.web.stopLoading()
         mv.removeFromSuperview()
