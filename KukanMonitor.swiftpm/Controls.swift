@@ -14,6 +14,7 @@ final class RadarView: UIView {
 
     var onPick: ((Int) -> Void)?
 
+    private let glass = GlassView(cornerRadius: 54)
     private let ring = CAShapeLayer()
     private let dots = CAShapeLayer()
     private let hotDots = CAShapeLayer()
@@ -22,7 +23,9 @@ final class RadarView: UIView {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        ring.lineWidth = 2
+        glass.isUserInteractionEnabled = false
+        addSubview(glass)
+        ring.lineWidth = 1
         layer.addSublayer(ring)
         layer.addSublayer(dots)
         layer.addSublayer(hotDots)
@@ -36,8 +39,9 @@ final class RadarView: UIView {
     }
 
     func applyTheme() {
-        ring.fillColor = Palette.panel.withAlphaComponent(0.6).cgColor
-        ring.strokeColor = Palette.edge.cgColor
+        glass.applyTheme()
+        ring.fillColor = UIColor.clear.cgColor
+        ring.strokeColor = UIColor(white: 1, alpha: 0.16).cgColor
         dots.fillColor = Palette.ink.withAlphaComponent(0.85).cgColor
         hotDots.fillColor = Palette.accent.cgColor
         me.fillColor = Palette.accent.cgColor
@@ -46,7 +50,10 @@ final class RadarView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         let b = bounds
-        ring.path = CGPath(ellipseIn: b.insetBy(dx: 1, dy: 1), transform: nil)
+        glass.frame = b
+        glass.setCornerRadius(b.width / 2)
+        // 内側の目盛りの輪（距離の目安）
+        ring.path = CGPath(ellipseIn: b.insetBy(dx: b.width * 0.25, dy: b.height * 0.25), transform: nil)
         // 自分（中心の三角形。とがった側が正面）
         let c = CGPoint(x: b.midX, y: b.midY)
         let p = CGMutablePath()
@@ -108,7 +115,7 @@ final class LauncherView: UIView {
     var onPick: ((String) -> Void)?
     var onClose: (() -> Void)?
 
-    private let panel = UIView()
+    private let panel = GlassView(cornerRadius: 26)
     private let stack = UIStackView()
     private var items: [Item] = []
     private var itemButtons: [UIButton] = []
@@ -117,17 +124,15 @@ final class LauncherView: UIView {
 
     init(sections: [(title: String, items: [Item])]) {
         super.init(frame: .zero)
-        backgroundColor = UIColor(white: 0, alpha: 0.5)
+        backgroundColor = UIColor(white: 0, alpha: 0.3)
         addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(backgroundTapped(_:))))
 
-        panel.layer.cornerRadius = 20
-        panel.layer.borderWidth = 2
         addSubview(panel)
 
         stack.axis = .vertical
         stack.alignment = .fill
         stack.spacing = 12
-        panel.addSubview(stack)
+        panel.contentView.addSubview(stack)
 
         addLabel("モニターを追加", size: 20, weight: .bold)
         for section in sections {
@@ -184,12 +189,11 @@ final class LauncherView: UIView {
 
     func applyTheme() {
         let t = Palette.theme
-        panel.backgroundColor = t.panel
-        panel.layer.borderColor = t.edge.cgColor
+        panel.applyTheme()
         for l in labels { l.textColor = t.ink }
         for b in itemButtons {
             var config = b.configuration
-            config?.baseBackgroundColor = t.ink.withAlphaComponent(0.14)
+            config?.baseBackgroundColor = UIColor(white: 1, alpha: 0.13)
             config?.baseForegroundColor = t.ink
             b.configuration = config
         }
@@ -326,18 +330,25 @@ enum RomajiKana {
 
 // MARK: - アプリ内キーボード（入力パネル）
 
-/// システムのキーボードが出ないときの代わり。パソコンと同じ QWERTY 配列で、ローマ字を打つとひらがなになる。
-/// 上の入力欄をタップしてシステムのキーボードが出る場合は、そちらでも入力できる。
+/// システムのキーボードが出ないときの代わり。iPadの英語キーボードと同じ比率の QWERTY 配列で、
+/// ローマ字を打つとひらがなになる。上の入力欄でシステムのキーボードが出る場合は、そちらでも入力できる。
 final class InputPanel: UIView, UITextFieldDelegate {
     var onChange: ((String) -> Void)?
     var onSubmit: ((String) -> Void)?
     var onClose: (() -> Void)?
 
-    private let column = UIStackView()
+    /// キー1つ分。title が空なら、幅だけ取る空き（2段目の左のずれなど）。
+    private struct Key {
+        let title: String
+        let units: CGFloat
+    }
+
+    private let glass = GlassView(cornerRadius: 24)
     private let titleLabel = UILabel()
     private let topRow = UIStackView()
     private let field = UITextField()
-    private let keyArea = UIStackView()
+    private let keyArea = UIView()
+    private var keyRows: [[(view: UIButton?, units: CGFloat)]] = []
     private var keyButtons: [UIButton] = []
     private var funcButtons: [UIButton] = []
     private var actionButtons: [UIButton] = []
@@ -349,45 +360,58 @@ final class InputPanel: UIView, UITextFieldDelegate {
     private var romaji = ""         // 変換前のローマ字（かなモードのみ）
     private var settingProgrammatically = false
 
-    private static let kanaRows: [[String]] = [
-        ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"],
-        ["a", "s", "d", "f", "g", "h", "j", "k", "l"],
-        ["z", "x", "c", "v", "b", "n", "m", "⌫"],
-        ["ABC", "123", "カナ", "空白", "ー", "。", "、"]
+    // 1段の合計は、どのモードでも 11.5 キー分（iPadの英語キーボードの1段目＝10キー＋⌫ 1.5）
+    private static let rowUnits: CGFloat = 11.5
+    private static let gap: CGFloat = 7
+    private static let rowGap: CGFloat = 8
+
+    private static func letters(_ s: String) -> [Key] {
+        s.map { Key(title: String($0), units: 1) }
+    }
+
+    private static let kanaRows: [[Key]] = [
+        InputPanel.letters("qwertyuiop") + [Key(title: "⌫", units: 1.5)],
+        [Key(title: "", units: 0.5)] + InputPanel.letters("asdfghjkl") + [Key(title: "決定", units: 2)],
+        [Key(title: "カナ", units: 1.5)] + InputPanel.letters("zxcvbnm") + InputPanel.letters("、。ー"),
+        [Key(title: "123", units: 1.5), Key(title: "ABC", units: 1.5), Key(title: "空白", units: 6.5),
+         Key(title: "？", units: 1), Key(title: "！", units: 1)]
     ]
-    private static let abcRows: [[String]] = [
-        ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"],
-        ["a", "s", "d", "f", "g", "h", "j", "k", "l"],
-        ["⇧", "z", "x", "c", "v", "b", "n", "m", "⌫"],
-        ["かな", "123", "@", ".", "/", "空白", ".com"]
+    private static let abcRows: [[Key]] = [
+        InputPanel.letters("qwertyuiop") + [Key(title: "⌫", units: 1.5)],
+        [Key(title: "", units: 0.5)] + InputPanel.letters("asdfghjkl") + [Key(title: "決定", units: 2)],
+        [Key(title: "⇧", units: 1.5)] + InputPanel.letters("zxcvbnm") + InputPanel.letters(",./"),
+        [Key(title: "123", units: 1.5), Key(title: "かな", units: 1.5), Key(title: "@", units: 1),
+         Key(title: "空白", units: 5.5), Key(title: ".com", units: 2)]
     ]
-    private static let numRows: [[String]] = [
-        ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"],
-        ["-", "/", ":", ";", "(", ")", "¥", "&", "@", "\""],
-        [".", ",", "?", "!", "'", "#", "%", "+", "=", "⌫"],
-        ["かな", "ABC", "空白", "。", "、"]
+    private static let numRows: [[Key]] = [
+        InputPanel.letters("1234567890") + [Key(title: "⌫", units: 1.5)],
+        [Key(title: "", units: 0.5)] + InputPanel.letters("-/:;()¥&@") + [Key(title: "決定", units: 2)],
+        InputPanel.letters(".,?!'\"#%+=") + [Key(title: "~", units: 1.5)],
+        [Key(title: "ABC", units: 1.5), Key(title: "かな", units: 1.5), Key(title: "空白", units: 6.5),
+         Key(title: "。", units: 1), Key(title: "、", units: 1)]
     ]
-    private static let functionTitles: Set<String> = ["⌫", "空白", "⇧", "かな", "ABC", "123", "カナ", "カタカナ", "ひらがな", ".com"]
+    private static let functionTitles: Set<String> = ["⌫", "空白", "⇧", "かな", "ABC", "123", "カナ", "カタカナ", "ひらがな", ".com", "決定"]
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        layer.cornerRadius = 18
-        layer.borderWidth = 2
-
-        column.axis = .vertical
-        column.alignment = .fill
-        column.spacing = 8
-        addSubview(column)
+        backgroundColor = .clear
+        addSubview(glass)
 
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         titleLabel.numberOfLines = 1
-        column.addArrangedSubview(titleLabel)
+        glass.contentView.addSubview(titleLabel)
 
         topRow.axis = .horizontal
         topRow.alignment = .fill
         topRow.spacing = 8
-        field.borderStyle = .roundedRect
+        field.borderStyle = .none
         field.font = .systemFont(ofSize: 18)
+        field.textColor = .white
+        field.backgroundColor = UIColor(white: 0, alpha: 0.28)
+        field.layer.cornerRadius = 10
+        field.layer.cornerCurve = .continuous
+        field.leftView = UIView(frame: CGRect(x: 0, y: 0, width: 12, height: 10))
+        field.leftViewMode = .always
         field.autocapitalizationType = .none
         field.autocorrectionType = .no
         field.returnKeyType = .done
@@ -399,15 +423,10 @@ final class InputPanel: UIView, UITextFieldDelegate {
         field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         topRow.addArrangedSubview(field)
         topRow.addArrangedSubview(makeAction("貼り付け", #selector(pasteTapped)))
-        topRow.addArrangedSubview(makeAction("決定", #selector(submitTapped)))
         topRow.addArrangedSubview(makeAction("閉じる", #selector(closeTapped)))
-        topRow.heightAnchor.constraint(equalToConstant: 44).isActive = true
-        column.addArrangedSubview(topRow)
+        glass.contentView.addSubview(topRow)
 
-        keyArea.axis = .vertical
-        keyArea.alignment = .fill
-        keyArea.spacing = 6
-        column.addArrangedSubview(keyArea)
+        glass.contentView.addSubview(keyArea)
 
         rebuildKeys()
     }
@@ -445,39 +464,86 @@ final class InputPanel: UIView, UITextFieldDelegate {
     func setKeysHidden(_ hidden: Bool) {
         if keyArea.isHidden != hidden {
             keyArea.isHidden = hidden
+            setNeedsLayout()
         }
     }
 
+    /// 1キー分の幅から決める、キーの高さ（実物のiPadと同じく、ほぼ正方形）
+    private func keyHeight(width: CGFloat) -> CGFloat {
+        let unit = (width - InputPanel.gap * 10) / InputPanel.rowUnits
+        return min(66, max(40, unit * 0.92))
+    }
+
+    private func keysHeight(width: CGFloat) -> CGFloat {
+        let rows = CGFloat(keyRows.count)
+        return rows * keyHeight(width: width) + max(0, rows - 1) * InputPanel.rowGap
+    }
+
     func preferredHeight(width: CGFloat) -> CGFloat {
-        let fit = column.systemLayoutSizeFitting(
-            CGSize(width: max(0, width - 28), height: UIView.layoutFittingCompressedSize.height),
-            withHorizontalFittingPriority: .required,
-            verticalFittingPriority: .fittingSizeLevel)
-        return fit.height + 28
+        let inner = max(0, width - 36)
+        var h: CGFloat = 18 + 18 + 10 + 44
+        if !keyArea.isHidden {
+            h += 14 + keysHeight(width: inner)
+        }
+        return h + 18
     }
 
     func applyTheme() {
         let t = Palette.theme
-        backgroundColor = t.panel
-        layer.borderColor = t.accent.cgColor
-        titleLabel.textColor = t.ink
+        glass.applyTheme()
+        titleLabel.textColor = t.ink.withAlphaComponent(0.8)
         for b in keyButtons {
-            b.backgroundColor = t.ink.withAlphaComponent(0.14)
-            b.setTitleColor(t.ink, for: .normal)
+            b.backgroundColor = UIColor(white: 1, alpha: 0.2)
+            b.setTitleColor(.white, for: .normal)
         }
         for b in funcButtons {
-            b.backgroundColor = t.accent.withAlphaComponent(0.22)
-            b.setTitleColor(t.ink, for: .normal)
+            b.backgroundColor = UIColor(white: 1, alpha: 0.08)
+            b.setTitleColor(.white, for: .normal)
         }
         for b in actionButtons {
-            b.backgroundColor = t.accent
-            b.setTitleColor(t.accentInk, for: .normal)
+            b.backgroundColor = UIColor(white: 1, alpha: 0.14)
+            b.setTitleColor(.white, for: .normal)
+        }
+        // 決定キーだけは目立たせる（iPadの「改行」キーの位置と大きさ）
+        for row in keyRows {
+            for item in row {
+                if let b = item.view, b.title(for: .normal) == "決定" {
+                    b.backgroundColor = t.accent
+                    b.setTitleColor(t.accentInk, for: .normal)
+                }
+            }
         }
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        column.frame = bounds.insetBy(dx: 14, dy: 14)
+        glass.frame = bounds
+        let inner = bounds.insetBy(dx: 18, dy: 18)
+        titleLabel.frame = CGRect(x: inner.minX, y: inner.minY, width: inner.width, height: 18)
+        topRow.frame = CGRect(x: inner.minX, y: inner.minY + 28, width: inner.width, height: 44)
+        if !keyArea.isHidden {
+            let w = inner.width
+            keyArea.frame = CGRect(x: inner.minX, y: topRow.frame.maxY + 14, width: w, height: keysHeight(width: w))
+            layoutKeys(width: w)
+        }
+    }
+
+    /// 段ごとに、キーの「何キー分の幅か」に合わせて並べる
+    private func layoutKeys(width: CGFloat) {
+        let h = keyHeight(width: width)
+        var y: CGFloat = 0
+        for row in keyRows {
+            let units = row.reduce(CGFloat(0)) { $0 + $1.units }
+            let gaps = InputPanel.gap * CGFloat(max(0, row.count - 1))
+            let unitW = units > 0 ? (width - gaps) / units : 0
+            var x: CGFloat = 0
+            for item in row {
+                let w = item.units * unitW
+                item.view?.frame = CGRect(x: x, y: y, width: w, height: h)
+                x += w + InputPanel.gap
+            }
+            y += h + InputPanel.rowGap
+        }
     }
 
     // MARK: キーの組み立て
@@ -487,8 +553,9 @@ final class InputPanel: UIView, UITextFieldDelegate {
         b.setTitle(title, for: .normal)
         b.titleLabel?.font = .systemFont(ofSize: 15, weight: .semibold)
         b.layer.cornerRadius = 10
+        b.layer.cornerCurve = .continuous
         b.addTarget(self, action: action, for: .touchUpInside)
-        b.widthAnchor.constraint(greaterThanOrEqualToConstant: 84).isActive = true
+        b.widthAnchor.constraint(greaterThanOrEqualToConstant: 88).isActive = true
         b.setContentHuggingPriority(.required, for: .horizontal)
         b.setContentCompressionResistancePriority(.required, for: .horizontal)
         actionButtons.append(b)
@@ -498,12 +565,19 @@ final class InputPanel: UIView, UITextFieldDelegate {
     private func makeKey(_ title: String) -> UIButton {
         let b = UIButton(type: .system)
         b.setTitle(title, for: .normal)
-        b.titleLabel?.font = .systemFont(ofSize: 18, weight: .medium)
+        let isFunction = InputPanel.functionTitles.contains(title)
+        b.titleLabel?.font = .systemFont(ofSize: isFunction ? 16 : 22, weight: isFunction ? .medium : .regular)
         b.titleLabel?.adjustsFontSizeToFitWidth = true
         b.titleLabel?.minimumScaleFactor = 0.6
         b.layer.cornerRadius = 8
+        b.layer.cornerCurve = .continuous
+        // 実物のキーのような、下側のわずかな影
+        b.layer.shadowColor = UIColor.black.cgColor
+        b.layer.shadowOpacity = 0.25
+        b.layer.shadowRadius = 0
+        b.layer.shadowOffset = CGSize(width: 0, height: 1)
         b.addTarget(self, action: #selector(keyTapped(_:)), for: .touchUpInside)
-        if InputPanel.functionTitles.contains(title) {
+        if isFunction {
             funcButtons.append(b)
         } else {
             keyButtons.append(b)
@@ -511,45 +585,40 @@ final class InputPanel: UIView, UITextFieldDelegate {
         return b
     }
 
-    private func addRow(_ titles: [String]) {
-        let row = UIStackView()
-        row.axis = .horizontal
-        row.spacing = 6
-        row.distribution = .fillEqually
-        for title in titles {
-            row.addArrangedSubview(makeKey(title))
-        }
-        row.heightAnchor.constraint(equalToConstant: 42).isActive = true
-        keyArea.addArrangedSubview(row)
-    }
-
     private func rebuildKeys() {
-        for v in keyArea.arrangedSubviews {
-            keyArea.removeArrangedSubview(v)
+        for v in keyArea.subviews {
             v.removeFromSuperview()
         }
+        keyRows.removeAll()
         keyButtons.removeAll()
         funcButtons.removeAll()
-        let rows: [[String]]
+        let rows: [[Key]]
         switch mode {
         case 1: rows = InputPanel.abcRows
         case 2: rows = InputPanel.numRows
         default: rows = InputPanel.kanaRows
         }
         for row in rows {
-            var titles: [String] = []
+            var built: [(view: UIButton?, units: CGFloat)] = []
             for key in row {
-                if key == "カナ" {
-                    titles.append(katakana ? "ひらがな" : "カタカナ")
-                } else if mode == 1 && key.count == 1, let ch = key.first, ch.isLetter {
-                    titles.append(upper ? key.uppercased() : key)
-                } else {
-                    titles.append(key)
+                if key.title.isEmpty {
+                    built.append((view: nil, units: key.units))
+                    continue
                 }
+                var title = key.title
+                if title == "カナ" {
+                    title = katakana ? "ひらがな" : "カタカナ"
+                } else if mode == 1 && title.count == 1, let ch = title.first, ch.isLetter, upper {
+                    title = title.uppercased()
+                }
+                let b = makeKey(title)
+                keyArea.addSubview(b)
+                built.append((view: b, units: key.units))
             }
-            addRow(titles)
+            keyRows.append(built)
         }
         applyTheme()
+        setNeedsLayout()
         superview?.setNeedsLayout()
     }
 
@@ -602,6 +671,8 @@ final class InputPanel: UIView, UITextFieldDelegate {
             flushRomaji()
             committed += " "
             updateField()
+        case "決定":
+            submitTapped()
         case "⇧":
             upper.toggle()
             rebuildKeys()
@@ -620,7 +691,7 @@ final class InputPanel: UIView, UITextFieldDelegate {
             committed += ".com"
             updateField()
         default:
-            if mode == 0, key.count == 1, let ch = key.first, ch.isLetter, ch.isLowercase {
+            if mode == 0, key.count == 1, let ch = key.first, ch.isASCII, ch.isLetter, ch.isLowercase {
                 romaji += key
                 updateField()
             } else {

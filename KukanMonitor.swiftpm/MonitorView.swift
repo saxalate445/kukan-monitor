@@ -74,9 +74,10 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
         super.init(frame: CGRect(origin: .zero, size: MonitorView.shapes[0].size))
 
         focusHandler.owner = self
-        backgroundColor = Palette.panel
-        layer.cornerRadius = 14
-        layer.borderWidth = 3
+        backgroundColor = Palette.panel.withAlphaComponent(0.55)
+        layer.cornerRadius = 20
+        layer.cornerCurve = .continuous
+        layer.borderWidth = 2
         layer.borderColor = Palette.edge.cgColor
         layer.allowsEdgeAntialiasing = true
         clipsToBounds = true
@@ -106,7 +107,13 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
         bar.addArrangedSubview(makeButton(symbol: "minus.magnifyingglass", title: nil, action: #selector(zoomOut)))
         bar.addArrangedSubview(makeButton(symbol: "plus.magnifyingglass", title: nil, action: #selector(zoomIn)))
 
-        field.borderStyle = .roundedRect
+        field.borderStyle = .none
+        field.backgroundColor = UIColor(white: 0, alpha: 0.3)
+        field.textColor = .white
+        field.layer.cornerRadius = 10
+        field.layer.cornerCurve = .continuous
+        field.leftView = UIView(frame: CGRect(x: 0, y: 0, width: 10, height: 10))
+        field.leftViewMode = .always
         field.font = .systemFont(ofSize: 15)
         field.placeholder = "URL または 検索ワード"
         field.keyboardType = .webSearch
@@ -247,11 +254,11 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
 
     func setHighlighted(_ on: Bool) {
         highlighted = on
-        layer.borderColor = (on ? Palette.accent : Palette.edge).cgColor
+        layer.borderColor = (on ? Palette.accent : UIColor(white: 1, alpha: 0.3)).cgColor
     }
 
     func applyTheme() {
-        backgroundColor = Palette.panel
+        backgroundColor = Palette.panel.withAlphaComponent(0.55)
         setHighlighted(highlighted)
         for b in barButtons { b.tintColor = Palette.accent }
         pushPageState()

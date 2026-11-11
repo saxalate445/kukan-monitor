@@ -165,16 +165,69 @@ enum Palette {
     static var accent: UIColor { theme.accent }
 }
 
+// MARK: - ガラス（すりガラス風の背景）
+
+/// iPadOSのコントロールセンターのような、背景がぼけて透ける板。
+/// 中に部品を置くときは contentView に追加する。
+final class GlassView: UIVisualEffectView {
+    private let tint = UIView()
+    private let highlight = CAGradientLayer()
+
+    init(cornerRadius: CGFloat) {
+        super.init(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
+        layer.cornerRadius = cornerRadius
+        layer.cornerCurve = .continuous
+        layer.borderWidth = 1
+        clipsToBounds = true
+        tint.isUserInteractionEnabled = false
+        contentView.addSubview(tint)
+        // 上端をほんのり明るくして、ガラスの厚みを出す
+        highlight.colors = [UIColor(white: 1, alpha: 0.16).cgColor, UIColor(white: 1, alpha: 0).cgColor]
+        highlight.locations = [0, 0.55]
+        contentView.layer.addSublayer(highlight)
+        applyTheme()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) は使いません")
+    }
+
+    func setCornerRadius(_ r: CGFloat) {
+        layer.cornerRadius = r
+    }
+
+    func applyTheme() {
+        tint.backgroundColor = Palette.panel.withAlphaComponent(0.32)
+        layer.borderColor = UIColor(white: 1, alpha: 0.24).cgColor
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        tint.frame = contentView.bounds
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        highlight.frame = contentView.bounds
+        CATransaction.commit()
+    }
+}
+
 // MARK: - 視点スティック（丸い操作パッド）
 
 final class JoystickView: UIView {
+    private let glass = GlassView(cornerRadius: 60)
     private let knob = UIView()
     private let caption = UILabel()
     private(set) var vector = CGPoint.zero   // 各軸 -1...1
 
     init(title: String) {
         super.init(frame: CGRect(x: 0, y: 0, width: 120, height: 120))
-        layer.borderWidth = 2
+        glass.isUserInteractionEnabled = false
+        addSubview(glass)
+        knob.layer.borderWidth = 1
+        knob.layer.shadowColor = UIColor.black.cgColor
+        knob.layer.shadowOpacity = 0.35
+        knob.layer.shadowRadius = 8
+        knob.layer.shadowOffset = CGSize(width: 0, height: 3)
         caption.text = title
         caption.font = .systemFont(ofSize: 11, weight: .semibold)
         caption.textAlignment = .center
@@ -192,15 +245,16 @@ final class JoystickView: UIView {
     }
 
     func applyTheme() {
-        backgroundColor = Palette.panel.withAlphaComponent(0.55)
-        layer.borderColor = Palette.edge.cgColor
-        knob.backgroundColor = Palette.accent
-        caption.textColor = Palette.ink
+        glass.applyTheme()
+        knob.backgroundColor = Palette.accent.withAlphaComponent(0.9)
+        knob.layer.borderColor = UIColor(white: 1, alpha: 0.55).cgColor
+        caption.textColor = Palette.ink.withAlphaComponent(0.85)
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        layer.cornerRadius = bounds.width / 2
+        glass.frame = bounds
+        glass.setCornerRadius(bounds.width / 2)
         caption.frame = CGRect(x: 0, y: 8, width: bounds.width, height: 14)
         if vector == .zero { knob.center = CGPoint(x: bounds.midX, y: bounds.midY) }
     }

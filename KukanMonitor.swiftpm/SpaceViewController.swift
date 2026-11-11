@@ -22,8 +22,11 @@ final class SpaceViewController: UIViewController {
     private let worldView = PassthroughView()
     private let touchView = UIView()
     private let reticle = UIView()
-    private let focusDim = UIView()
+    private let focusDim = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
     private let toastLabel = UILabel()
+    private let toastGlass = GlassView(cornerRadius: 18)
+    private let menuGlass = GlassView(cornerRadius: 28)
+    private let menuButtonGlass = GlassView(cornerRadius: 29)
     private let radar = RadarView(frame: CGRect(x: 0, y: 0, width: 108, height: 108))
     private var launcher: LauncherView?
     private let inputPanel = InputPanel(frame: .zero)
@@ -171,6 +174,7 @@ final class SpaceViewController: UIViewController {
         view.addSubview(reticle)
 
         buildMenu()
+        view.addSubview(menuGlass)
         view.addSubview(menuPanel)
 
         // レーダー：点をタップすると、そのモニターの方へ向く
@@ -193,8 +197,9 @@ final class SpaceViewController: UIViewController {
         // 丸いメニューボタン：タップでメニューの表示/非表示、ドラッグで移動。
         menuButton.setImage(UIImage(systemName: "line.3.horizontal"), for: .normal)
         menuButton.bounds = CGRect(x: 0, y: 0, width: 58, height: 58)
-        menuButton.layer.cornerRadius = 29
-        menuButton.layer.borderWidth = 2
+        menuButtonGlass.isUserInteractionEnabled = false
+        menuButtonGlass.frame = menuButton.bounds
+        menuButton.insertSubview(menuButtonGlass, at: 0)
         menuButton.addTarget(self, action: #selector(toggleMenu), for: .touchUpInside)
         menuButton.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(moveMenuButton(_:))))
         view.addSubview(menuButton)
@@ -202,14 +207,11 @@ final class SpaceViewController: UIViewController {
         toastLabel.font = .systemFont(ofSize: 14, weight: .medium)
         toastLabel.textAlignment = .center
         toastLabel.numberOfLines = 0
-        toastLabel.layer.cornerRadius = 10
-        toastLabel.layer.borderWidth = 1
-        toastLabel.clipsToBounds = true
-        toastLabel.isHidden = true
-        toastLabel.isUserInteractionEnabled = false
-        view.addSubview(toastLabel)
+        toastGlass.contentView.addSubview(toastLabel)
+        toastGlass.isHidden = true
+        toastGlass.isUserInteractionEnabled = false
+        view.addSubview(toastGlass)
 
-        focusDim.backgroundColor = UIColor(white: 0, alpha: 0.55)
         focusDim.isHidden = true
         focusDim.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(dimTapped)))
         view.addSubview(focusDim)
@@ -398,15 +400,14 @@ final class SpaceViewController: UIViewController {
         gridLayer.strokeColor = t.grid.cgColor
         starLayer.fillColor = t.star.cgColor
         sunLayer.fillColor = (t.sun ?? UIColor.clear).cgColor
-        helpLabel.textColor = t.text
+        helpLabel.textColor = t.ink.withAlphaComponent(0.78)
         reticle.layer.borderColor = (gazed == nil ? t.text : t.accent).cgColor
         toastLabel.textColor = t.ink
-        toastLabel.backgroundColor = t.panel
-        toastLabel.layer.borderColor = t.accent.cgColor
-        menuButton.backgroundColor = t.panel.withAlphaComponent(0.85)
-        menuButton.tintColor = t.accent
-        menuButton.layer.borderColor = t.edge.cgColor
-        tabs.backgroundColor = t.panel.withAlphaComponent(0.85)
+        toastGlass.applyTheme()
+        menuGlass.applyTheme()
+        menuButtonGlass.applyTheme()
+        menuButton.tintColor = t.ink
+        tabs.backgroundColor = UIColor(white: 1, alpha: 0.1)
         tabs.selectedSegmentTintColor = t.accent
         tabs.setTitleTextAttributes([NSAttributedString.Key.foregroundColor: t.ink], for: .normal)
         tabs.setTitleTextAttributes([NSAttributedString.Key.foregroundColor: t.accentInk], for: .selected)
@@ -417,7 +418,7 @@ final class SpaceViewController: UIViewController {
         inputPanel.applyTheme()
         for item in hudButtons {
             var config = item.button.configuration
-            config?.baseBackgroundColor = item.primary ? t.accent : t.panel
+            config?.baseBackgroundColor = item.primary ? t.accent : UIColor(white: 1, alpha: 0.14)
             config?.baseForegroundColor = item.primary ? t.accentInk : t.ink
             item.button.configuration = config
         }
@@ -826,8 +827,11 @@ final class SpaceViewController: UIViewController {
         let safe = view.safeAreaInsets
         let fit = menuPanel.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
         let rowSize = CGSize(width: min(fit.width, b.width - 24), height: fit.height)
-        let rowY = b.height - safe.bottom - 16 - rowSize.height
+        let rowY = b.height - safe.bottom - 28 - rowSize.height
         menuPanel.frame = CGRect(x: (b.width - rowSize.width) / 2, y: rowY, width: rowSize.width, height: rowSize.height)
+        // メニューの後ろに、ひと回り大きいガラスの板を敷く
+        menuGlass.frame = menuPanel.frame.insetBy(dx: -18, dy: -14)
+        menuGlass.isHidden = menuPanel.isHidden
         // 置き場所は画面端からの距離で決めるので、回転や画面サイズの変化にもついてくる。
         // 動かしていないスティックは、メニューの横に置けるなら下側へ、狭ければメニューの上へ。
         let fitsBeside = menuPanel.isHidden || b.width - rowSize.width >= 2 * 164
@@ -838,7 +842,8 @@ final class SpaceViewController: UIViewController {
         walkStick.center = clamped(point(for: walkAnchor), half: 60)
         lookStick.center = clamped(point(for: lookAnchor), half: 60)
         radar.frame = CGRect(x: b.width - safe.right - 16 - 108, y: safe.top + 16, width: 108, height: 108)
-        toastLabel.frame = CGRect(x: max(16, (b.width - 640) / 2), y: safe.top + 16, width: min(640, b.width - 32), height: 72)
+        toastGlass.frame = CGRect(x: max(16, (b.width - 640) / 2), y: safe.top + 16, width: min(640, b.width - 32), height: 72)
+        toastLabel.frame = toastGlass.bounds.insetBy(dx: 16, dy: 8)
 
         if !inputPanel.isHidden {
             // システムのキーボードが出ているときは、その上に入力欄だけを置く
@@ -1307,12 +1312,12 @@ final class SpaceViewController: UIViewController {
                 gazed = nil
                 refreshHighlights()
                 mv.setHighlighted(true)
-                mv.layer.borderWidth = 6
+                mv.layer.borderWidth = 4
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
             }
         case .ended, .cancelled, .failed:
             if let mv = grabbed {
-                mv.layer.borderWidth = 3
+                mv.layer.borderWidth = 2
                 grabbed = nil
                 refreshHighlights()
                 saveMonitors()
@@ -1599,14 +1604,14 @@ final class SpaceViewController: UIViewController {
 
     private func showToast(_ text: String) {
         toastLabel.text = text
-        toastLabel.isHidden = false
-        view.bringSubviewToFront(toastLabel)
+        toastGlass.isHidden = false
+        view.bringSubviewToFront(toastGlass)
         toastToken += 1
         let token = toastToken
         Task {
             try? await Task.sleep(nanoseconds: 4_500_000_000)
             if self.toastToken == token {
-                self.toastLabel.isHidden = true
+                self.toastGlass.isHidden = true
             }
         }
     }
