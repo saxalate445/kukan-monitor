@@ -20,6 +20,12 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
     var yaw: Double
     var pitch: Double
     var scale: Double = 1
+    /// 空間の中心からの距離。大画面は遠くに置く
+    var radius: Double = MonitorView.distance
+    /// その場での向き（上から見た回転）。自分の方を向けるときに使う
+    var turn: Double = 0
+    /// ほかのモニターと再生を取り合って止められた
+    var onMediaConflict: (() -> Void)?
 
     var onClose: (() -> Void)?
     var onMaximize: (() -> Void)?
@@ -61,6 +67,8 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
         self.homeURL = url
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
+        // 再生の再開をページから行えるよう、再生にタップを必須にしない
+        config.mediaTypesRequiringUserActionForPlayback = []
         // ページの全画面は、補助スクリプトでモニター枠の中での全画面に差し替える。
         // iPadの画面全体を乗っ取るネイティブ全画面は使わない。
         config.preferences.isElementFullscreenEnabled = false
@@ -68,6 +76,7 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
         let focusHandler = WeakScriptHandler()
         config.userContentController.add(focusHandler, name: "kukanFocus")
         config.userContentController.add(focusHandler, name: "kukanFill")
+        config.userContentController.add(focusHandler, name: "kukanMedia")
         config.userContentController.addUserScript(
             WKUserScript(source: WebAssets.bootstrapScript, injectionTime: .atDocumentStart, forMainFrameOnly: false))
         self.web = WKWebView(frame: .zero, configuration: config)
@@ -229,7 +238,8 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
     /// 空間内での位置と向きを反映する
     func place() {
         var t = CATransform3DMakeScale(CGFloat(scale), CGFloat(scale), 1)
-        t = CATransform3DConcat(t, CATransform3DMakeTranslation(0, 0, CGFloat(-MonitorView.distance)))
+        t = CATransform3DConcat(t, CATransform3DMakeRotation(CGFloat(turn), 0, 1, 0))
+        t = CATransform3DConcat(t, CATransform3DMakeTranslation(0, 0, CGFloat(-radius)))
         t = CATransform3DConcat(t, CATransform3DMakeRotation(CGFloat(pitch), 1, 0, 0))
         t = CATransform3DConcat(t, CATransform3DMakeRotation(CGFloat(yaw), 0, 1, 0))
         layer.transform = t
@@ -277,6 +287,11 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
         web.evaluateJavaScript(js) { [weak self] result, _ in
             self?.onFillResult?((result as? String) ?? "none")
         }
+    }
+
+    /// ページの動画が、ほかのモニターとの取り合いで止められた
+    func webMediaConflict() {
+        onMediaConflict?()
     }
 
     /// ページ側で全画面にされた／戻された、または fill の結果が確定した

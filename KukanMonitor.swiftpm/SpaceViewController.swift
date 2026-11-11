@@ -3,10 +3,11 @@ import WebKit
 import CoreMotion
 import AVFoundation
 import GameController
+import SceneKit
 
 // MARK: - 空間全体
 
-final class SpaceViewController: UIViewController {
+final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate {
     // 背景
     private let cameraView = UIView()
     private let sceneryView = UIView()
@@ -29,6 +30,15 @@ final class SpaceViewController: UIViewController {
     private let menuButtonGlass = GlassView(cornerRadius: 29)
     private let radar = RadarView(frame: CGRect(x: 0, y: 0, width: 108, height: 108))
     private var launcher: LauncherView?
+    private var designLauncher: LauncherView?
+    private let space3D = SpaceScene()                  // 家具などの3D（SceneKit）
+    private var pinchFurniture: FurnitureItem?
+    private var furnitureGrabOffset = (x: 0.0, z: 0.0)
+    private var grabDistance = 1100.0                   // つかんだモニターと自分の距離
+    private var frameCount = 0
+    private var conflictNotified = false
+    private var confirmUntil: CFTimeInterval = 0
+    private var starterButton: UIButton?
     private let inputPanel = InputPanel(frame: .zero)
     private weak var inputMonitor: MonitorView?   // アプリ内キーボードの入力先
     private var inputIsURL = false
@@ -37,7 +47,7 @@ final class SpaceViewController: UIViewController {
     private let menuButton = UIButton(type: .system)
     private let menuPanel = UIStackView()
     private let helpLabel = UILabel()
-    private let tabs = UISegmentedControl(items: ["モニター", "空間", "操作"])
+    private let tabs = UISegmentedControl(items: ["モニター", "デザイン", "空間", "操作"])
     private var pages: [UIStackView] = []
     private var hudButtons: [(button: UIButton, primary: Bool)] = []
     private var themeButton: UIButton?
@@ -83,7 +93,7 @@ final class SpaceViewController: UIViewController {
     private var perspective = 500.0
     private var gazeDir = Vec3(0, 0, -1)
     private var camPos = Vec3(0, 0, 0)       // 空間内での自分の位置
-    private let walkLimit = 850.0            // 中心から動ける距離
+    private let walkLimit = 3200.0           // 中心から動ける距離
 
     // 設定
     private var touchMode = 0                // 0: 最大化して操作, 1: 空間で直接（照準の1枚）, 2: 空間で直接（すべて）
@@ -140,6 +150,9 @@ final class SpaceViewController: UIViewController {
             touchMode = min(2, max(0, defaults.integer(forKey: touchModeKey)))
         }
         audioFocus = defaults.bool(forKey: audioKey)
+        // ほかのモニターや他のアプリの音と混ぜて再生する（1つの再生でほかが止まらないように）
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback, options: [.mixWithOthers])
+        try? AVAudioSession.sharedInstance().setActive(true)
         view.backgroundColor = .black
         view.layer.insertSublayer(backdrop, at: 0)
 
@@ -157,16 +170,26 @@ final class SpaceViewController: UIViewController {
         sceneryView.layer.addSublayer(starLayer)
         sceneryView.layer.addSublayer(theaterDim)
         view.addSubview(sceneryView)
+        // 家具などの3D。床の格子より手前、モニターより奥に描く
+        view.addSubview(space3D.view)
 
         // 何もない所へのタッチは touchView、モニターへのタッチは上に重ねた worldView が受ける
         view.addSubview(touchView)
         view.addSubview(worldView)
         touchView.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(handleTap(_:))))
-        touchView.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:))))
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+        pan.maximumNumberOfTouches = 1
+        touchView.addGestureRecognizer(pan)
         let hold = UILongPressGestureRecognizer(target: self, action: #selector(handleHold(_:)))
         hold.minimumPressDuration = 0.45
         touchView.addGestureRecognizer(hold)
-        touchView.addGestureRecognizer(UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:))))
+        let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
+        pinch.delegate = self
+        touchView.addGestureRecognizer(pinch)
+        // 2本指でひねると、照準の家具（またはモニター）を回す
+        let rotate = UIRotationGestureRecognizer(target: self, action: #selector(handleRotate(_:)))
+        rotate.delegate = self
+        touchView.addGestureRecognizer(rotate)
 
         reticle.isUserInteractionEnabled = false
         reticle.layer.borderWidth = 2
@@ -217,6 +240,7 @@ final class SpaceViewController: UIViewController {
         view.addSubview(focusDim)
 
         buildLauncher()
+        buildDesignLauncher()
 
         // アプリ内キーボード
         inputPanel.isHidden = true
@@ -234,6 +258,10 @@ final class SpaceViewController: UIViewController {
 
         makeStars()
         loadMonitors()
+        if !space3D.load() {
+            space3D.starterLayout()
+            space3D.save()
+        }
         applyTheme()
         updateSettingTitles()
 
@@ -316,6 +344,26 @@ final class SpaceViewController: UIViewController {
             makeHUDButton("形を変える", primary: false, action: #selector(changeGazedShape)),
             makeHUDButton("動画を広げる", primary: false, action: #selector(toggleFillTarget))
         ]
+        let monitorRow3: [UIButton] = [
+            makeHUDButton("近くへ", primary: false, action: #selector(moveTargetNearer)),
+            makeHUDButton("遠くへ", primary: false, action: #selector(moveTargetFarther))
+        ]
+
+        // 「デザイン」のページ
+        let starter = makeHUDButton("おすすめ配置", primary: false, action: #selector(applyStarterLayout))
+        starterButton = starter
+        let designRow1: [UIButton] = [
+            makeHUDButton("家具を置く", primary: true, action: #selector(openDesignLauncher)),
+            makeHUDButton("大画面を呼ぶ", primary: false, action: #selector(callBigScreen)),
+            makeHUDButton("色を変える", primary: false, action: #selector(recolorFurniture)),
+            makeHUDButton("回す", primary: false, action: #selector(rotateFurniture))
+        ]
+        let designRow2: [UIButton] = [
+            makeHUDButton("大きく", primary: false, action: #selector(enlargeFurniture)),
+            makeHUDButton("小さく", primary: false, action: #selector(shrinkFurniture)),
+            makeHUDButton("片付ける", primary: false, action: #selector(deleteFurniture)),
+            starter
+        ]
 
         // 「空間」のページ
         let theme = makeHUDButton("空間：" + Palette.theme.name, primary: false, action: #selector(nextTheme))
@@ -340,7 +388,8 @@ final class SpaceViewController: UIViewController {
         let controlRow2: [UIButton] = [walkB, lookB]
 
         pages = [
-            makePage([monitorRow1, monitorRow2]),
+            makePage([monitorRow1, monitorRow2, monitorRow3]),
+            makePage([designRow1, designRow2]),
             makePage([spaceRow1, spaceRow2]),
             makePage([controlRow1, controlRow2])
         ]
@@ -415,6 +464,8 @@ final class SpaceViewController: UIViewController {
         walkStick.applyTheme()
         radar.applyTheme()
         launcher?.applyTheme()
+        designLauncher?.applyTheme()
+        space3D.applyTheme()
         inputPanel.applyTheme()
         for item in hudButtons {
             var config = item.button.configuration
@@ -518,6 +569,7 @@ final class SpaceViewController: UIViewController {
         CATransaction.setAnimationDuration(0.6)
         theaterDim.opacity = dim ? 0.6 : 0
         CATransaction.commit()
+        space3D.setDimmed(dim)
     }
 
     // MARK: 丸いボタンとスティックの置き場所
@@ -684,7 +736,7 @@ final class SpaceViewController: UIViewController {
     // MARK: モニターの大きさ・形・並べ方
 
     private func setScale(_ mv: MonitorView, _ value: Double) {
-        mv.scale = min(2.0, max(0.5, value))
+        mv.scale = min(4.0, max(0.5, value))
         mv.place()
     }
 
@@ -731,14 +783,21 @@ final class SpaceViewController: UIViewController {
         switch g.state {
         case .began:
             pinchTarget = focused == nil ? currentTarget : nil
+            pinchFurniture = (focused == nil && pinchTarget == nil) ? furnitureTarget : nil
         case .changed:
             if let mv = pinchTarget {
                 setScale(mv, mv.scale * Double(g.scale))
                 g.scale = 1
+            } else if let f = pinchFurniture {
+                f.scale = min(3, max(0.4, f.scale * Double(g.scale)))
+                g.scale = 1
+                space3D.update(f)
             }
         default:
             if pinchTarget != nil { saveMonitors() }
+            if pinchFurniture != nil { space3D.save() }
             pinchTarget = nil
+            pinchFurniture = nil
         }
     }
 
@@ -756,6 +815,8 @@ final class SpaceViewController: UIViewController {
             mv.yaw = -(Double(i) - Double(items.count - 1) / 2) * step * deg
             mv.pitch = pitch * deg
             mv.scale = scale
+            mv.radius = MonitorView.distance
+            mv.turn = 0
         }
     }
 
@@ -778,6 +839,8 @@ final class SpaceViewController: UIViewController {
                 m.yaw = 0
                 m.pitch = -4 * Double.pi / 180
                 m.scale = 1.6
+                m.radius = MonitorView.distance
+                m.turn = 0
             }
             spread(rest, step: 26, pitch: 34, scale: 0.6)
         case 3:
@@ -814,6 +877,8 @@ final class SpaceViewController: UIViewController {
         previewLayer?.frame = b
         updatePreviewOrientation()
         sceneryView.frame = b
+        space3D.view.frame = b
+        space3D.updateFieldOfView(viewHeight: b.height, perspective: perspective)
         sunLayer.frame = b
         gridLayer.frame = b
         starLayer.frame = b
@@ -918,7 +983,7 @@ final class SpaceViewController: UIViewController {
 
     /// 自分の位置から見た、モニターの方角
     private func heading(to mv: MonitorView) -> Double {
-        let c = direction(yaw: mv.yaw, pitch: mv.pitch) * MonitorView.distance - camPos
+        let c = frame(of: mv).center - camPos
         return atan2(-c.x, -c.z)
     }
 
@@ -1014,6 +1079,7 @@ final class SpaceViewController: UIViewController {
         }
 
         let R = cameraRotation()
+        space3D.setCamera(rotation: R, position: camPos)
         let s = [1.0, -1.0, 1.0]
         var v = Mat3.identity
         for i in 0..<3 {
@@ -1040,16 +1106,15 @@ final class SpaceViewController: UIViewController {
         worldView.layer.sublayerTransform = t
 
         if let g = grabbed {
-            let spot = spherePoint(alongRay: gazeDir)
-            g.yaw = spot.yaw
-            g.pitch = spot.pitch
-            g.place()
+            // つかんだ距離のまま視線の先へ動かし、こちらを向ける
+            placeMonitor(g, at: camPos + gazeDir * grabDistance, faceCamera: true)
         }
         for mv in monitors where mv !== focused {
-            // 視点の後ろ側に回ったモニターは描かない
-            mv.isHidden = !isOnScreen(mv)
+            // 視点の後ろ側に回ったモニターは描かない。
+            // 非表示（isHidden）にするとページが「見えていない」扱いになり動画が止まるため、透明にする。
+            mv.alpha = isOnScreen(mv) ? 1 : 0
         }
-        if focused == nil && grabbed == nil {
+        if focused == nil && grabbed == nil && space3D.grabbed == nil {
             let hit = monitor(alongRay: gazeDir)
             if hit !== gazed {
                 gazed = hit
@@ -1062,6 +1127,30 @@ final class SpaceViewController: UIViewController {
                 refreshHighlights()
                 updateTheater()
             }
+            // 家具：モニターに照準が乗っていないときだけ選ぶ（3Dの当たり判定は3フレームに1回）
+            frameCount += 1
+            if hit != nil {
+                if space3D.hovered != nil { space3D.hovered = nil }
+            } else if frameCount % 3 == 0 {
+                let b = view.bounds
+                let f = space3D.furniture(at: CGPoint(x: b.midX, y: b.midY))
+                if f !== space3D.hovered {
+                    space3D.hovered = f
+                    reticle.layer.borderColor = (f == nil ? Palette.mute : Palette.accent).cgColor
+                }
+            }
+        }
+        if let f = space3D.grabbed, let p = floorPoint(alongRay: gazeDir) {
+            var x = p.x + furnitureGrabOffset.x
+            var z = p.z + furnitureGrabOffset.z
+            let d = (x * x + z * z).squareRoot()
+            if d > 4000 {
+                x *= 4000 / d
+                z *= 4000 / d
+            }
+            f.x = x
+            f.z = z
+            space3D.update(f)
         }
         drawScenery()
         if !radar.isHidden { updateRadar() }
@@ -1076,11 +1165,11 @@ final class SpaceViewController: UIViewController {
         let fz = gazeDir.z / flat
         var blips: [RadarView.Blip] = []
         for mv in monitors {
-            let c = direction(yaw: mv.yaw, pitch: mv.pitch) * MonitorView.distance - camPos
+            let c = frame(of: mv).center - camPos
             let forward = c.x * fx + c.z * fz
             let right = c.z * fx - c.x * fz
-            var x = right / 1700
-            var y = -forward / 1700
+            var x = right / 3000
+            var y = -forward / 3000
             let len = (x * x + y * y).squareRoot()
             if len > 1 {
                 x /= len
@@ -1092,23 +1181,67 @@ final class SpaceViewController: UIViewController {
         radar.update(blips)
     }
 
-    /// 視点から出る線（空間座標）が当たるモニターを返す
+    /// モニターの中心と向き（空間の座標、y下向き）
+    private struct MonitorFrame {
+        let center: Vec3
+        let right: Vec3
+        let down: Vec3
+        let front: Vec3    // 表側（見る人の側）
+    }
+
+    private func frame(of mv: MonitorView) -> MonitorFrame {
+        let r = Mat3.rotY(mv.yaw) * Mat3.rotX(mv.pitch)
+        let ct = cos(mv.turn), st = sin(mv.turn)
+        return MonitorFrame(center: r.apply(Vec3(0, 0, -mv.radius)),
+                            right: r.apply(Vec3(ct, 0, -st)),
+                            down: r.apply(Vec3(0, 1, 0)),
+                            front: r.apply(Vec3(st, 0, ct)))
+    }
+
+    /// モニターを center に置く。faceCamera なら表を自分の方へ向ける
+    private func placeMonitor(_ mv: MonitorView, at center: Vec3, faceCamera: Bool) {
+        let len = center.dot(center).squareRoot()
+        let r = min(6000, max(300, len))
+        let c = len > 1 ? center * (r / len) : Vec3(0, 0, -r)
+        mv.radius = r
+        mv.yaw = atan2(-c.x, -c.z)
+        mv.pitch = asin(max(-1, min(1, c.y / r)))
+        if faceCamera {
+            let rot = Mat3.rotY(mv.yaw) * Mat3.rotX(mv.pitch)
+            let toCamera = (camPos - c).normalized
+            let local = rot.applyTransposed(toCamera)
+            mv.turn = atan2(local.x, local.z)
+        }
+        mv.place()
+    }
+
+    /// 視線が床に当たる場所（床が見えない向きなら、前方の床）
+    private func floorPoint(alongRay d: Vec3) -> (x: Double, z: Double)? {
+        let floorY = 700.0
+        if d.y > 0.05 {
+            let t = min(3000, (floorY - camPos.y) / d.y)
+            let p = camPos + d * t
+            return (x: p.x, z: p.z)
+        }
+        let flat = (d.x * d.x + d.z * d.z).squareRoot()
+        if flat < 0.01 { return nil }
+        return (x: camPos.x + d.x / flat * 1500, z: camPos.z + d.z / flat * 1500)
+    }
+
+    /// 視点から出る線（空間座標）が、表側から当たるモニターを返す
     private func monitor(alongRay d: Vec3) -> MonitorView? {
         var best: MonitorView?
         var bestT = Double.greatestFiniteMagnitude
         for mv in monitors where mv !== focused {
-            let a = mv.yaw, b = mv.pitch
+            let f = frame(of: mv)
+            let k = d.dot(f.front)
+            if k > -0.02 { continue }
+            let tt = (f.center - camPos).dot(f.front) / k
+            if tt <= 0 { continue }
+            let p = camPos + d * tt - f.center
             let halfW = Double(mv.spaceSize.width) / 2 * mv.scale
             let halfH = Double(mv.spaceSize.height) / 2 * mv.scale
-            let n = direction(yaw: a, pitch: b)
-            let k = d.dot(n)
-            if k < 0.02 { continue }
-            let tt = (MonitorView.distance - camPos.dot(n)) / k
-            if tt <= 0 { continue }
-            let p = camPos + d * tt - n * MonitorView.distance
-            let right = Vec3(cos(a), 0, -sin(a))
-            let down = Vec3(sin(b) * sin(a), cos(b), sin(b) * cos(a))
-            if abs(p.dot(right)) <= halfW && abs(p.dot(down)) <= halfH && tt < bestT {
+            if abs(p.dot(f.right)) <= halfW && abs(p.dot(f.down)) <= halfH && tt < bestT {
                 best = mv
                 bestT = tt
             }
@@ -1116,29 +1249,15 @@ final class SpaceViewController: UIViewController {
         return best
     }
 
-    /// 視線が、モニターを並べている球面（中心は空間の原点）に当たる場所
-    private func spherePoint(alongRay d: Vec3) -> (yaw: Double, pitch: Double) {
-        let D = MonitorView.distance
-        let od = camPos.dot(d)
-        let disc = od * od - (camPos.dot(camPos) - D * D)
-        let t = -od + max(0, disc).squareRoot()
-        let q = camPos + d * t
-        return (yaw: atan2(-q.x, -q.z), pitch: asin(max(-1, min(1, q.y / D))))
-    }
-
-    /// モニターが画面に少しでも映るか。視点の後ろ側だけにある場合は false。
+    /// モニターが画面に少しでも映るか。裏側にいるときや、視点の後ろだけにあるときは false。
     private func isOnScreen(_ mv: MonitorView) -> Bool {
-        let a = mv.yaw, b = mv.pitch
-        let n = direction(yaw: a, pitch: b)
-        if camPos.dot(n) >= MonitorView.distance { return false }
-        let right = Vec3(cos(a), 0, -sin(a))
-        let down = Vec3(sin(b) * sin(a), cos(b), sin(b) * cos(a))
-        let center = n * MonitorView.distance
+        let f = frame(of: mv)
+        if (camPos - f.center).dot(f.front) <= 0 { return false }
         let hw = Double(mv.spaceSize.width) / 2 * mv.scale
         let hh = Double(mv.spaceSize.height) / 2 * mv.scale
         let signs: [(Double, Double)] = [(-1, -1), (1, -1), (1, 1), (-1, 1)]
         let pts = signs.map { s in
-            viewMatrix.apply(center + right * (s.0 * hw) + down * (s.1 * hh) - camPos)
+            viewMatrix.apply(f.center + f.right * (s.0 * hw) + f.down * (s.1 * hh) - camPos)
         }
         // 視点より前にある部分だけを切り出す
         let near = -30.0
@@ -1215,11 +1334,11 @@ final class SpaceViewController: UIViewController {
             grid.addLine(to: proj(c))
         }
         let floorY = 700.0
-        var k = -3000.0
-        while k <= 3000.0 {
-            line(Vec3(k, floorY, -3000), Vec3(k, floorY, 3000))
-            line(Vec3(-3000, floorY, k), Vec3(3000, floorY, k))
-            k += 300
+        var k = -6000.0
+        while k <= 6000.0 {
+            line(Vec3(k, floorY, -6000), Vec3(k, floorY, 6000))
+            line(Vec3(-6000, floorY, k), Vec3(6000, floorY, k))
+            k += 400
         }
         gridLayer.path = grid
 
@@ -1309,10 +1428,18 @@ final class SpaceViewController: UIViewController {
             if focused != nil { return }
             if let mv = currentTarget {
                 grabbed = mv
+                let toward = frame(of: mv).center - camPos
+                grabDistance = max(400, toward.dot(toward).squareRoot())
                 gazed = nil
                 refreshHighlights()
                 mv.setHighlighted(true)
                 mv.layer.borderWidth = 4
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            } else if let f = space3D.hovered {
+                // 家具：視線が床に当たる場所へ動かす（つかんだ位置からずれないよう差を覚える）
+                let p = floorPoint(alongRay: gazeDir) ?? (x: f.x, z: f.z)
+                furnitureGrabOffset = (x: f.x - p.x, z: f.z - p.z)
+                space3D.grabbed = f
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
             }
         case .ended, .cancelled, .failed:
@@ -1321,6 +1448,10 @@ final class SpaceViewController: UIViewController {
                 grabbed = nil
                 refreshHighlights()
                 saveMonitors()
+            }
+            if space3D.grabbed != nil {
+                space3D.grabbed = nil
+                space3D.save()
             }
         default:
             break
@@ -1422,8 +1553,8 @@ final class SpaceViewController: UIViewController {
     /// 見ている方向に、新しいモニターを置く
     private func addMonitor(_ urlString: String) {
         guard monitors.count < maxMonitors, let url = URL(string: urlString) else { return }
-        let spot = spherePoint(alongRay: gazeDir)
-        _ = makeMonitor(url: url, yaw: spot.yaw, pitch: spot.pitch)
+        let mv = makeMonitor(url: url, yaw: 0, pitch: 0)
+        placeMonitor(mv, at: camPos + gazeDir * MonitorView.distance, faceCamera: true)
         saveMonitors()
         if audioFocus { applyAudioFocus() }
         showToast("見ている方向にモニターを追加しました。")
@@ -1456,6 +1587,7 @@ final class SpaceViewController: UIViewController {
         }
         mv.onChange = { [weak self] in self?.saveMonitors() }
         mv.onFillChanged = { [weak self] in self?.updateTheater() }
+        mv.onMediaConflict = { [weak self] in self?.mediaConflict() }
         mv.onFillResult = { [weak self] state in
             if state == "on" {
                 self?.showToast("動画をモニターいっぱいに広げました。もう一度押すと戻ります。")
@@ -1505,7 +1637,9 @@ final class SpaceViewController: UIViewController {
         for s in saved.prefix(maxMonitors) {
             if let url = URL(string: s.url) {
                 let mv = makeMonitor(url: url, yaw: s.yaw, pitch: s.pitch)
-                mv.scale = min(2.0, max(0.5, s.scale ?? 1))
+                mv.scale = min(4.0, max(0.5, s.scale ?? 1))
+                mv.radius = min(6000, max(300, s.radius ?? MonitorView.distance))
+                mv.turn = s.turn ?? 0
                 mv.shape = min(MonitorView.shapes.count - 1, max(0, s.shape ?? 0))
                 mv.bounds = CGRect(origin: .zero, size: mv.spaceSize)
                 mv.place()
@@ -1516,11 +1650,220 @@ final class SpaceViewController: UIViewController {
     private func saveMonitors() {
         var list: [SavedMonitor] = []
         for mv in monitors {
-            list.append(SavedMonitor(url: mv.currentURLString, yaw: mv.yaw, pitch: mv.pitch, scale: mv.scale, shape: mv.shape))
+            list.append(SavedMonitor(url: mv.currentURLString, yaw: mv.yaw, pitch: mv.pitch, scale: mv.scale, shape: mv.shape,
+                                     radius: mv.radius, turn: mv.turn))
         }
         if let data = try? JSONEncoder().encode(list) {
             UserDefaults.standard.set(data, forKey: saveKey)
         }
+    }
+
+    // MARK: 空間のデザイン（家具・大画面）
+
+    private var furnitureTarget: FurnitureItem? {
+        space3D.grabbed ?? space3D.hovered
+    }
+
+    private func needFurniture() -> FurnitureItem? {
+        if let f = furnitureTarget { return f }
+        showToast("家具に中央の照準を合わせてください（選ばれると足元に輪が出ます）。")
+        return nil
+    }
+
+    private func buildDesignLauncher() {
+        var furnitureItems: [LauncherView.Item] = []
+        for c in FurnitureFactory.catalog {
+            furnitureItems.append(LauncherView.Item(title: c.name, url: "furniture:" + c.id))
+        }
+        let screenItems: [LauncherView.Item] = [
+            LauncherView.Item(title: "大画面 YouTube", url: "screen:https://www.youtube.com/"),
+            LauncherView.Item(title: "大画面 Google", url: "screen:https://www.google.com/"),
+            LauncherView.Item(title: "大画面 時計", url: "screen:" + WebAssets.widgetURLString("clock"))
+        ]
+        let panel = LauncherView(title: "空間をデザイン", sections: [
+            (title: "家具（見ている床の上に置きます）", items: furnitureItems),
+            (title: "大画面（前方の遠くに、大きく置きます）", items: screenItems)
+        ])
+        panel.isHidden = true
+        panel.onClose = { [weak self] in
+            self?.designLauncher?.isHidden = true
+        }
+        panel.onPick = { [weak self] id in
+            guard let self = self else { return }
+            self.designLauncher?.isHidden = true
+            if id.hasPrefix("furniture:") {
+                self.addFurniture(String(id.dropFirst("furniture:".count)))
+            } else if id.hasPrefix("screen:") {
+                self.callBigScreen(String(id.dropFirst("screen:".count)))
+            }
+        }
+        view.addSubview(panel)
+        designLauncher = panel
+    }
+
+    @objc private func openDesignLauncher() {
+        if let panel = designLauncher {
+            panel.isHidden = false
+            view.bringSubviewToFront(panel)
+        }
+    }
+
+    /// 見ている床の上に家具を置き、こちらを向ける
+    private func addFurniture(_ kind: String) {
+        if space3D.items.count >= 60 {
+            showToast("家具は60個までです。不要なものを片付けてください。")
+            return
+        }
+        let flat = (gazeDir.x * gazeDir.x + gazeDir.z * gazeDir.z).squareRoot()
+        let fx = flat > 0.01 ? gazeDir.x / flat : 0
+        let fz = flat > 0.01 ? gazeDir.z / flat : -1
+        var x = camPos.x + fx * 1100
+        var z = camPos.z + fz * 1100
+        if let p = floorPoint(alongRay: gazeDir) {
+            let dx = p.x - camPos.x, dz = p.z - camPos.z
+            // 足元すぎる場所は自分と重なるので、前方に置く
+            if (dx * dx + dz * dz).squareRoot() >= 600 {
+                x = p.x
+                z = p.z
+            }
+        }
+        let item = space3D.add(kind: kind, x: x, z: z, rotation: atan2(x - camPos.x, z - camPos.z),
+                               scale: 1, color: FurnitureFactory.defaultColor(of: kind))
+        space3D.save()
+        space3D.hovered = item
+        showToast(item.name + "を置きました。照準を合わせて長押しで移動、2本指でひねって回転、ピンチで大きさを変えられます。")
+    }
+
+    @objc private func callBigScreen() {
+        callBigScreen("https://www.youtube.com/")
+    }
+
+    /// 前方の遠くに、横長の大きな画面を置く
+    private func callBigScreen(_ urlString: String) {
+        guard monitors.count < maxMonitors, let url = URL(string: urlString) else {
+            showToast("モニターは\(maxMonitors)枚までです。不要なものを削除してください。")
+            return
+        }
+        let flat = (gazeDir.x * gazeDir.x + gazeDir.z * gazeDir.z).squareRoot()
+        let fx = flat > 0.01 ? gazeDir.x / flat : 0
+        let fz = flat > 0.01 ? gazeDir.z / flat : -1
+        let mv = makeMonitor(url: url, yaw: 0, pitch: 0)
+        mv.shape = 1
+        mv.bounds = CGRect(origin: .zero, size: mv.spaceSize)
+        mv.scale = 3.2
+        // 目の高さより少し上に中心を置く（空間の y は下向き）
+        placeMonitor(mv, at: Vec3(camPos.x + fx * 2600, -350, camPos.z + fz * 2600), faceCamera: true)
+        saveMonitors()
+        if audioFocus { applyAudioFocus() }
+        showToast("前方に大画面を置きました。ピンチで大きさ、「近くへ」「遠くへ」で距離を変えられます。")
+    }
+
+    @objc private func rotateFurniture() {
+        guard let f = needFurniture() else { return }
+        f.rotation += Double.pi / 4
+        space3D.update(f)
+        space3D.save()
+    }
+
+    @objc private func recolorFurniture() {
+        guard let f = needFurniture() else { return }
+        space3D.setColor(f, f.color + 1)
+        space3D.save()
+        showToast("色：" + FurnitureFactory.colors[f.color].name)
+    }
+
+    @objc private func enlargeFurniture() {
+        guard let f = needFurniture() else { return }
+        f.scale = min(3, f.scale * 1.15)
+        space3D.update(f)
+        space3D.save()
+    }
+
+    @objc private func shrinkFurniture() {
+        guard let f = needFurniture() else { return }
+        f.scale = max(0.4, f.scale / 1.15)
+        space3D.update(f)
+        space3D.save()
+    }
+
+    @objc private func deleteFurniture() {
+        guard let f = needFurniture() else { return }
+        let name = f.name
+        space3D.remove(f)
+        space3D.save()
+        showToast(name + "を片付けました。")
+    }
+
+    /// いまの家具を、おすすめの配置に置き換える（取り消せないので2回押しで確定）
+    @objc private func applyStarterLayout() {
+        let now = CACurrentMediaTime()
+        if now > confirmUntil {
+            confirmUntil = now + 3
+            setTitle(starterButton, "もう一度押すと置き換え")
+            showToast("いまの家具を、おすすめの配置に置き換えます。よければもう一度押してください。")
+            Task {
+                try? await Task.sleep(nanoseconds: 3_100_000_000)
+                if CACurrentMediaTime() >= self.confirmUntil {
+                    self.setTitle(self.starterButton, "おすすめ配置")
+                }
+            }
+            return
+        }
+        confirmUntil = 0
+        setTitle(starterButton, "おすすめ配置")
+        space3D.starterLayout()
+        space3D.save()
+        showToast("おすすめの配置にしました。")
+    }
+
+    @objc private func moveTargetNearer() { moveTarget(by: -350) }
+    @objc private func moveTargetFarther() { moveTarget(by: 350) }
+
+    /// 照準のモニターを、自分との距離に沿って近づける／遠ざける
+    private func moveTarget(by delta: Double) {
+        guard let mv = currentTarget else {
+            showToast("距離を変えたいモニターに、中央の照準を合わせてください。")
+            return
+        }
+        let toward = frame(of: mv).center - camPos
+        let dist = toward.dot(toward).squareRoot()
+        let newDist = min(5500, max(350, dist + delta))
+        placeMonitor(mv, at: camPos + toward.normalized * newDist, faceCamera: true)
+        saveMonitors()
+    }
+
+    @objc private func handleRotate(_ g: UIRotationGestureRecognizer) {
+        if focused != nil { return }
+        let r = Double(g.rotation)
+        g.rotation = 0
+        let done = g.state == .ended || g.state == .cancelled
+        if let f = furnitureTarget, currentTarget == nil {
+            f.rotation -= r
+            space3D.update(f)
+            if done { space3D.save() }
+        } else if let mv = currentTarget {
+            mv.turn -= r
+            mv.place()
+            if done { saveMonitors() }
+        }
+    }
+
+    /// ピンチと2本指の回転は、同時に使える
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        let both = [gestureRecognizer, otherGestureRecognizer]
+        return both.allSatisfy { $0 is UIPinchGestureRecognizer || $0 is UIRotationGestureRecognizer }
+    }
+
+    /// 音の出る動画の同時再生がiPadに止められたとき：音声フォーカスに切り替えて、全部を再生し続ける
+    private func mediaConflict() {
+        if audioFocus || conflictNotified { return }
+        conflictNotified = true
+        audioFocus = true
+        UserDefaults.standard.set(true, forKey: audioKey)
+        applyAudioFocus()
+        updateSettingTitles()
+        showToast("iPadの制限で、音の出る動画は同時に1つまでのようです。音声フォーカスをオンにしました（見ているモニターの音が出て、ほかは消音で再生を続けます）。")
     }
 
     // MARK: AR（カメラ背景）

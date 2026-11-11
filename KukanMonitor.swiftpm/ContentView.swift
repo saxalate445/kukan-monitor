@@ -75,6 +75,8 @@ struct SavedMonitor: Codable {
     var pitch: Double
     var scale: Double?
     var shape: Int?
+    var radius: Double?
+    var turn: Double?
 }
 
 /// 空間の見た目（テーマ）
@@ -292,6 +294,10 @@ final class WeakScriptHandler: NSObject, WKScriptMessageHandler {
     weak var owner: MonitorView?
     func userContentController(_ userContentController: WKUserContentController,
                                didReceive message: WKScriptMessage) {
+        if message.name == "kukanMedia" {
+            owner?.webMediaConflict()
+            return
+        }
         if message.name == "kukanFill" {
             let on = (message.body as? [String: Any])?["fill"] as? Bool ?? false
             owner?.webFillChanged(on)

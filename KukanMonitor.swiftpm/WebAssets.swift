@@ -119,6 +119,14 @@ enum WebAssets {
   K.setMuted = function (on) {
     K.muted = !!on;
     applyMute();
+    if (K.muted) {
+      document.querySelectorAll('video,audio').forEach(function (m) {
+        if (m.__kukanSysPaused && m.paused && !m.ended) {
+          m.__kukanResumes = [];
+          if (K.resume) K.resume(m);
+        }
+      });
+    }
     document.querySelectorAll('iframe').forEach(function (f) {
       try { f.contentWindow.postMessage({ __kukanMuted: K.muted }, '*'); } catch (_) {}
     });
@@ -134,6 +142,52 @@ enum WebAssets {
   }
   document.addEventListener('play', keepMuted, true);
   document.addEventListener('volumechange', keepMuted, true);
+
+  // ---- 同時再生：ほかのモニターの再生でこの動画が止められたら、すぐ再開する ----
+  // ページ自身（利用者の操作やサイトの都合）が止めた場合は再開しない。
+  // iPadの制限で取り合いになるときは、数回で諦めてアプリに知らせる。
+  (function keepPlaying() {
+    var proto = window.HTMLMediaElement && HTMLMediaElement.prototype;
+    if (!proto || proto.__kukanWrapped) return;
+    proto.__kukanWrapped = true;
+    var origPause = proto.pause;
+    proto.pause = function () {
+      try { this.__kukanIntended = Date.now(); } catch (_) {}
+      return origPause.apply(this, arguments);
+    };
+    var lastUser = 0;
+    ['pointerdown', 'touchstart', 'mousedown', 'keydown'].forEach(function (t) {
+      document.addEventListener(t, function () { lastUser = Date.now(); }, true);
+    });
+    K.keepPlaying = true;
+    function resume(m) {
+      var now = Date.now();
+      m.__kukanResumes = (m.__kukanResumes || []).filter(function (t) { return now - t < 10000; });
+      if (m.__kukanResumes.length >= 3) {
+        try { window.webkit.messageHandlers.kukanMedia.postMessage({ conflict: true }); } catch (_) {}
+        return;
+      }
+      m.__kukanResumes.push(now);
+      setTimeout(function () {
+        if (!m.paused || m.ended) return;
+        try { var r = m.play(); if (r && r.catch) r.catch(function () {}); } catch (_) {}
+      }, 150);
+    }
+    K.resume = resume;
+    document.addEventListener('pause', function (e) {
+      var m = e.target;
+      if (!K.keepPlaying || !m || typeof m.play !== 'function') return;
+      if (m.ended || m.seeking) return;
+      var now = Date.now();
+      if (now - (m.__kukanIntended || 0) < 1500) return;   // ページが止めた
+      if (now - lastUser < 800) return;                     // このページで操作した直後
+      m.__kukanSysPaused = true;
+      resume(m);
+    }, true);
+    document.addEventListener('play', function (e) {
+      if (e.target) e.target.__kukanSysPaused = false;
+    }, true);
+  })();
 
   // ---- 動画をページ（＝モニター）いっぱいに広げる ----
   var STYLE_ID = 'kukan-fill-style';

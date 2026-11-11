@@ -122,7 +122,7 @@ final class LauncherView: UIView {
     private var labels: [UILabel] = []
     private let closeButton = UIButton(configuration: UIButton.Configuration.filled())
 
-    init(sections: [(title: String, items: [Item])]) {
+    init(title: String = "モニターを追加", sections: [(title: String, items: [Item])]) {
         super.init(frame: .zero)
         backgroundColor = UIColor(white: 0, alpha: 0.3)
         addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(backgroundTapped(_:))))
@@ -134,7 +134,7 @@ final class LauncherView: UIView {
         stack.spacing = 12
         panel.contentView.addSubview(stack)
 
-        addLabel("モニターを追加", size: 20, weight: .bold)
+        addLabel(title, size: 20, weight: .bold)
         for section in sections {
             addLabel(section.title, size: 13, weight: .semibold)
             var row: UIStackView?
