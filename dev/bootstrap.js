@@ -145,6 +145,15 @@
     return frame ? { target: frame, video: null } : null;
   }
 
+  function ensureStyle() {
+    if (!document.getElementById(STYLE_ID)) {
+      var st = document.createElement('style');
+      st.id = STYLE_ID;
+      st.textContent = CSS;
+      (document.head || document.documentElement).appendChild(st);
+    }
+  }
+
   function clearFill() {
     document.querySelectorAll('[data-kukan-fill],[data-kukan-fill-anc],[data-kukan-fill-mid]').forEach(function (el) {
       el.removeAttribute('data-kukan-fill');
@@ -152,7 +161,24 @@
       el.removeAttribute('data-kukan-fill-mid');
     });
     document.documentElement.removeAttribute('data-kukan-fill-on');
-    K.fillOn = false;
+  }
+
+  // 指定した要素を画面（＝モニターの枠）いっぱいにする
+  function applyChain(target, video) {
+    ensureStyle();
+    var root = document.documentElement;
+    target.setAttribute('data-kukan-fill', '');
+    for (var p = target.parentElement; p && p !== root; p = p.parentElement) p.setAttribute('data-kukan-fill-anc', '');
+    if (video && video !== target) {
+      for (var m = video.parentElement; m && m !== target; m = m.parentElement) m.setAttribute('data-kukan-fill-mid', '');
+    }
+    root.setAttribute('data-kukan-fill-on', '');
+    window.dispatchEvent(new Event('resize'));
+  }
+
+  function notifyFill(on) {
+    K.fillOn = !!on;
+    try { window.webkit.messageHandlers.kukanFill.postMessage({ fill: !!on }); } catch (_) {}
   }
 
   K.fillOn = false;
@@ -160,29 +186,67 @@
   K.fill = function (on) {
     if (!on) {
       clearFill();
+      notifyFill(false);
       window.dispatchEvent(new Event('resize'));
       return 'off';
     }
     clearFill();
     var pick = pickTarget();
     if (!pick) return 'none';
-    if (!document.getElementById(STYLE_ID)) {
-      var st = document.createElement('style');
-      st.id = STYLE_ID;
-      st.textContent = CSS;
-      (document.head || document.documentElement).appendChild(st);
-    }
-    var root = document.documentElement;
-    pick.target.setAttribute('data-kukan-fill', '');
-    for (var p = pick.target.parentElement; p && p !== root; p = p.parentElement) p.setAttribute('data-kukan-fill-anc', '');
-    if (pick.video && pick.video !== pick.target) {
-      for (var m = pick.video.parentElement; m && m !== pick.target; m = m.parentElement) m.setAttribute('data-kukan-fill-mid', '');
-    }
-    root.setAttribute('data-kukan-fill-on', '');
-    K.fillOn = true;
-    window.dispatchEvent(new Event('resize'));
+    applyChain(pick.target, pick.video);
+    notifyFill(true);
     return 'on';
   };
+
+  // ---- 全画面：ページの「全画面」ボタンを、モニターの枠の中での全画面に差し替える ----
+  // iPadの画面全体を乗っ取らず、空間に浮かんだモニターの中だけで全画面にする。
+  (function shimFullscreen() {
+    var fsElement = null;
+    function fire() {
+      ['fullscreenchange', 'webkitfullscreenchange'].forEach(function (name) {
+        var e;
+        try { e = new Event(name, { bubbles: true }); } catch (_) { e = document.createEvent('Event'); e.initEvent(name, true, false); }
+        document.dispatchEvent(e);
+      });
+    }
+    function enter(el) {
+      fsElement = el || document.documentElement;
+      clearFill();
+      var v = (fsElement.tagName && fsElement.tagName.toLowerCase() === 'video') ? fsElement
+            : (fsElement.querySelector ? fsElement.querySelector('video') : null);
+      applyChain(fsElement, v);
+      notifyFill(true);
+      fire();
+      return Promise.resolve();
+    }
+    function leave() {
+      fsElement = null;
+      clearFill();
+      notifyFill(false);
+      window.dispatchEvent(new Event('resize'));
+      fire();
+      return Promise.resolve();
+    }
+    function set(obj, name, fn) { try { obj[name] = fn; } catch (_) {} }
+    set(Element.prototype, 'requestFullscreen', function () { return enter(this); });
+    set(Element.prototype, 'webkitRequestFullscreen', function () { return enter(this); });
+    set(Element.prototype, 'webkitRequestFullScreen', function () { return enter(this); });
+    set(document, 'exitFullscreen', leave);
+    set(document, 'webkitExitFullscreen', leave);
+    set(document, 'webkitCancelFullScreen', leave);
+    function getter(name, fn) { try { Object.defineProperty(document, name, { configurable: true, get: fn }); } catch (_) {} }
+    getter('fullscreenElement', function () { return fsElement; });
+    getter('webkitFullscreenElement', function () { return fsElement; });
+    getter('webkitCurrentFullScreenElement', function () { return fsElement; });
+    getter('fullscreenEnabled', function () { return true; });
+    getter('webkitFullscreenEnabled', function () { return true; });
+    if (window.HTMLVideoElement) {
+      set(HTMLVideoElement.prototype, 'webkitEnterFullscreen', function () { enter(this); });
+      set(HTMLVideoElement.prototype, 'webkitExitFullscreen', function () { leave(); });
+      set(HTMLVideoElement.prototype, 'webkitSetPresentationMode', function (mode) { if (mode === 'fullscreen') { enter(this); } else { leave(); } });
+    }
+    K.exitFullscreen = function () { if (fsElement) leave(); };
+  })();
 
   // ---- ウィジェット用：アプリのテーマ色を受け取る ----
   K.setTheme = function (bg, fg, mute, accent) {

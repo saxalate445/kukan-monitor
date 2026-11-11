@@ -238,6 +238,11 @@ final class WeakScriptHandler: NSObject, WKScriptMessageHandler {
     weak var owner: MonitorView?
     func userContentController(_ userContentController: WKUserContentController,
                                didReceive message: WKScriptMessage) {
+        if message.name == "kukanFill" {
+            let on = (message.body as? [String: Any])?["fill"] as? Bool ?? false
+            owner?.webFillChanged(on)
+            return
+        }
         let body = message.body as? [String: Any]
         let value = body?["value"] as? String ?? ""
         let secure = body?["secure"] as? Bool ?? false

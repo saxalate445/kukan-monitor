@@ -61,11 +61,13 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
         self.homeURL = url
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
-        // YouTubeなどの全画面ボタンを使えるようにする
-        config.preferences.isElementFullscreenEnabled = true
+        // ページの全画面は、補助スクリプトでモニター枠の中での全画面に差し替える。
+        // iPadの画面全体を乗っ取るネイティブ全画面は使わない。
+        config.preferences.isElementFullscreenEnabled = false
         // 補助スクリプト：入力欄の検知、音声フォーカス用の消音、動画を広げる処理
         let focusHandler = WeakScriptHandler()
         config.userContentController.add(focusHandler, name: "kukanFocus")
+        config.userContentController.add(focusHandler, name: "kukanFill")
         config.userContentController.addUserScript(
             WKUserScript(source: WebAssets.bootstrapScript, injectionTime: .atDocumentStart, forMainFrameOnly: false))
         self.web = WKWebView(frame: .zero, configuration: config)
@@ -261,17 +263,21 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
         setVideoFill(!videoFill)
     }
 
-    /// ページ内の動画を、モニターの枠いっぱいに広げる（または戻す）
+    /// ページ内の動画を、モニターの枠いっぱいに広げる（または戻す）。
+    /// 実際の状態は、ページからの kukanFill メッセージ（webFillChanged）で受け取る。
     func setVideoFill(_ on: Bool) {
         let js = "window.__kukan ? window.__kukan.fill(\(on)) : 'none'"
         web.evaluateJavaScript(js) { [weak self] result, _ in
-            guard let self = self else { return }
-            let state = (result as? String) ?? "none"
-            self.videoFill = (state == "on")
-            self.updateChrome()
-            self.onFillChanged?()
-            self.onFillResult?(state)
+            self?.onFillResult?((result as? String) ?? "none")
         }
+    }
+
+    /// ページ側で全画面にされた／戻された、または fill の結果が確定した
+    func webFillChanged(_ on: Bool) {
+        if videoFill == on { return }
+        videoFill = on
+        updateChrome()
+        onFillChanged?()
     }
 
     /// 音声フォーカス用：このモニターの音を消す（または戻す）

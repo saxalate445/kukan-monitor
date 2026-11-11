@@ -231,9 +231,102 @@ final class LauncherView: UIView {
     }
 }
 
+// MARK: - ローマ字→ひらがな変換
+
+/// ローマ字入力をひらがなに変換する。漢字変換はしない（実在のIMEと同じ「かな」までの確定）。
+enum RomajiKana {
+    static let map: [String: String] = [
+        "-": "ー", "a": "あ", "e": "え", "i": "い", "o": "お", "u": "う",
+        "ba": "ば", "be": "べ", "bi": "び", "bo": "ぼ", "bu": "ぶ", "da": "だ",
+        "de": "で", "di": "ぢ", "do": "ど", "du": "づ", "fa": "ふぁ", "fe": "ふぇ",
+        "fi": "ふぃ", "fo": "ふぉ", "fu": "ふ", "ga": "が", "ge": "げ", "gi": "ぎ",
+        "go": "ご", "gu": "ぐ", "ha": "は", "he": "へ", "hi": "ひ", "ho": "ほ",
+        "hu": "ふ", "ja": "じゃ", "je": "じぇ", "ji": "じ", "jo": "じょ", "ju": "じゅ",
+        "ka": "か", "ke": "け", "ki": "き", "ko": "こ", "ku": "く", "la": "ぁ",
+        "le": "ぇ", "li": "ぃ", "lo": "ぉ", "lu": "ぅ", "ma": "ま", "me": "め",
+        "mi": "み", "mo": "も", "mu": "む", "na": "な", "ne": "ね", "ni": "に",
+        "no": "の", "nu": "ぬ", "pa": "ぱ", "pe": "ぺ", "pi": "ぴ", "po": "ぽ",
+        "pu": "ぷ", "ra": "ら", "re": "れ", "ri": "り", "ro": "ろ", "ru": "る",
+        "sa": "さ", "se": "せ", "si": "し", "so": "そ", "su": "す", "ta": "た",
+        "te": "て", "ti": "ち", "to": "と", "tu": "つ", "va": "ゔぁ", "ve": "ゔぇ",
+        "vi": "ゔぃ", "vo": "ゔぉ", "vu": "ゔ", "wa": "わ", "we": "うぇ", "wi": "うぃ",
+        "wo": "を", "xa": "ぁ", "xe": "ぇ", "xi": "ぃ", "xo": "ぉ", "xu": "ぅ",
+        "ya": "や", "yo": "よ", "yu": "ゆ", "za": "ざ", "ze": "ぜ", "zi": "じ",
+        "zo": "ぞ", "zu": "ず", "bya": "びゃ", "byo": "びょ", "byu": "びゅ", "cha": "ちゃ",
+        "che": "ちぇ", "chi": "ち", "cho": "ちょ", "chu": "ちゅ", "cya": "ちゃ", "cyo": "ちょ",
+        "cyu": "ちゅ", "gya": "ぎゃ", "gyo": "ぎょ", "gyu": "ぎゅ", "hya": "ひゃ", "hyo": "ひょ",
+        "hyu": "ひゅ", "jya": "じゃ", "jyo": "じょ", "jyu": "じゅ", "kya": "きゃ", "kyo": "きょ",
+        "kyu": "きゅ", "ltu": "っ", "lwa": "ゎ", "lya": "ゃ", "lyo": "ょ", "lyu": "ゅ",
+        "mya": "みゃ", "myo": "みょ", "myu": "みゅ", "nya": "にゃ", "nyo": "にょ", "nyu": "にゅ",
+        "pya": "ぴゃ", "pyo": "ぴょ", "pyu": "ぴゅ", "rya": "りゃ", "ryo": "りょ", "ryu": "りゅ",
+        "sha": "しゃ", "she": "しぇ", "shi": "し", "sho": "しょ", "shu": "しゅ", "sya": "しゃ",
+        "syo": "しょ", "syu": "しゅ", "tha": "てゃ", "thi": "てぃ", "tsu": "つ", "tya": "ちゃ",
+        "tyo": "ちょ", "tyu": "ちゅ", "xtu": "っ", "xya": "ゃ", "xyo": "ょ", "xyu": "ゅ",
+        "zya": "じゃ", "zyo": "じょ", "zyu": "じゅ", "ltsu": "っ", "xtsu": "っ"
+    ]
+    private static let vowels: Set<Character> = ["a", "i", "u", "e", "o"]
+    private static func isConsonant(_ c: Character) -> Bool { c.isLetter && !vowels.contains(c) }
+
+    /// ローマ字の並びを、確定できる先頭部分だけ変換する。残り（まだ決まらない部分）も返す。
+    static func convert(_ s: String) -> (kana: String, rest: String) {
+        let a = Array(s)
+        let n = a.count
+        var out = ""
+        var i = 0
+        while i < n {
+            var matched = false
+            var L = min(4, n - i)
+            while L >= 1 {
+                if let k = map[String(a[i ..< i + L])] {
+                    out += k
+                    i += L
+                    matched = true
+                    break
+                }
+                L -= 1
+            }
+            if matched { continue }
+            let c = a[i]
+            let nxt: Character? = i + 1 < n ? a[i + 1] : nil
+            if c == "n" {
+                guard let nx = nxt else { break }
+                if vowels.contains(nx) || nx == "y" { break }
+                if nx == "'" { out += "ん"; i += 2; continue }
+                if nx == "n" {
+                    let after: Character? = i + 2 < n ? a[i + 2] : nil
+                    if let af = after, vowels.contains(af) || af == "y" {
+                        out += "ん"; i += 1
+                    } else {
+                        out += "ん"; i += 2
+                    }
+                    continue
+                }
+                out += "ん"; i += 1; continue
+            }
+            if let nx = nxt, nx == c, isConsonant(c) {
+                out += "っ"; i += 1; continue
+            }
+            break
+        }
+        return (out, String(a[i ..< n]))
+    }
+
+    static func toKatakana(_ s: String) -> String {
+        var out = String.UnicodeScalarView()
+        for u in s.unicodeScalars {
+            if u.value >= 0x3041 && u.value <= 0x3096, let k = Unicode.Scalar(u.value + 0x60) {
+                out.append(k)
+            } else {
+                out.append(u)
+            }
+        }
+        return String(out)
+    }
+}
+
 // MARK: - アプリ内キーボード（入力パネル）
 
-/// システムのキーボードが出ないときの代わり。ゲーム機の文字入力のように、五十音の表から文字を選ぶ。
+/// システムのキーボードが出ないときの代わり。パソコンと同じ QWERTY 配列で、ローマ字を打つとひらがなになる。
 /// 上の入力欄をタップしてシステムのキーボードが出る場合は、そちらでも入力できる。
 final class InputPanel: UIView, UITextFieldDelegate {
     var onChange: ((String) -> Void)?
@@ -246,34 +339,35 @@ final class InputPanel: UIView, UITextFieldDelegate {
     private let field = UITextField()
     private let keyArea = UIStackView()
     private var keyButtons: [UIButton] = []
+    private var funcButtons: [UIButton] = []
     private var actionButtons: [UIButton] = []
-    private var mode = 0            // 0: かな, 1: 英字, 2: 数字と記号
+
+    private var mode = 0            // 0: かな（ローマ字）, 1: ABC（英字）, 2: 123（数字と記号）
     private var katakana = false
     private var upper = false
+    private var committed = ""      // 確定した文字（かな・英字・記号・空白）
+    private var romaji = ""         // 変換前のローマ字（かなモードのみ）
+    private var settingProgrammatically = false
 
-    /// 「＿」は空きマス
-    private static let kanaRows: [String] = [
-        "あかさたなはまやらわ",
-        "いきしちにひみ＿りを",
-        "うくすつぬふむゆるん",
-        "えけせてねへめ＿れー",
-        "おこそとのほもよろ、"
+    private static let kanaRows: [[String]] = [
+        ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"],
+        ["a", "s", "d", "f", "g", "h", "j", "k", "l"],
+        ["z", "x", "c", "v", "b", "n", "m", "⌫"],
+        ["ABC", "123", "カナ", "空白", "ー", "。", "、"]
     ]
-    private static let abcRows: [String] = ["qwertyuiop", "asdfghjkl", "zxcvbnm"]
-    private static let symbolRows: [[String]] = [
+    private static let abcRows: [[String]] = [
+        ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"],
+        ["a", "s", "d", "f", "g", "h", "j", "k", "l"],
+        ["⇧", "z", "x", "c", "v", "b", "n", "m", "⌫"],
+        ["かな", "123", "@", ".", "/", "空白", ".com"]
+    ]
+    private static let numRows: [[String]] = [
         ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"],
-        ["-", "/", ":", ";", "(", ")", "¥", "&", "@", "~"],
-        [".", ",", "?", "!", "'", "#", "%", "+", "=", "_"]
+        ["-", "/", ":", ";", "(", ")", "¥", "&", "@", "\""],
+        [".", ",", "?", "!", "'", "#", "%", "+", "=", "⌫"],
+        ["かな", "ABC", "空白", "。", "、"]
     ]
-    /// 「゛゜」を押すたびに、最後の文字をこの順で切り替える
-    private static let voicedCycles: [String] = [
-        "かが", "きぎ", "くぐ", "けげ", "こご", "さざ", "しじ", "すず", "せぜ", "そぞ",
-        "ただ", "ちぢ", "つづ", "てで", "とど", "はばぱ", "ひびぴ", "ふぶぷ", "へべぺ", "ほぼぽ", "うゔ"
-    ]
-    /// 「小」を押すたびに、最後の文字を小さい字と切り替える
-    private static let smallCycles: [String] = [
-        "あぁ", "いぃ", "うぅ", "えぇ", "おぉ", "つっ", "やゃ", "ゆゅ", "よょ", "わゎ"
-    ]
+    private static let functionTitles: Set<String> = ["⌫", "空白", "⇧", "かな", "ABC", "123", "カナ", "カタカナ", "ひらがな", ".com"]
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -286,6 +380,7 @@ final class InputPanel: UIView, UITextFieldDelegate {
         addSubview(column)
 
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.numberOfLines = 1
         column.addArrangedSubview(titleLabel)
 
         topRow.axis = .horizontal
@@ -325,8 +420,16 @@ final class InputPanel: UIView, UITextFieldDelegate {
 
     func open(title: String, text: String, secure: Bool) {
         titleLabel.text = title
+        committed = text
+        romaji = ""
+        mode = 0
+        upper = false
+        katakana = false
         field.isSecureTextEntry = secure
+        settingProgrammatically = true
         field.text = text
+        settingProgrammatically = false
+        rebuildKeys()
     }
 
     /// 上の入力欄にカーソルを入れる（システムのキーボードが使える環境なら、ここで出てくる）
@@ -338,7 +441,7 @@ final class InputPanel: UIView, UITextFieldDelegate {
         field.resignFirstResponder()
     }
 
-    /// システムのキーボードが出ている間は、五十音のキーを隠す
+    /// システムのキーボードが出ている間は、QWERTYのキーを隠す（上の入力欄だけ使う）
     func setKeysHidden(_ hidden: Bool) {
         if keyArea.isHidden != hidden {
             keyArea.isHidden = hidden
@@ -360,6 +463,10 @@ final class InputPanel: UIView, UITextFieldDelegate {
         titleLabel.textColor = t.ink
         for b in keyButtons {
             b.backgroundColor = t.ink.withAlphaComponent(0.14)
+            b.setTitleColor(t.ink, for: .normal)
+        }
+        for b in funcButtons {
+            b.backgroundColor = t.accent.withAlphaComponent(0.22)
             b.setTitleColor(t.ink, for: .normal)
         }
         for b in actionButtons {
@@ -388,16 +495,19 @@ final class InputPanel: UIView, UITextFieldDelegate {
         return b
     }
 
-    private func makeKey(_ title: String) -> UIView {
-        if title == "＿" {
-            return UIView()
-        }
+    private func makeKey(_ title: String) -> UIButton {
         let b = UIButton(type: .system)
         b.setTitle(title, for: .normal)
-        b.titleLabel?.font = .systemFont(ofSize: 20, weight: .medium)
+        b.titleLabel?.font = .systemFont(ofSize: 18, weight: .medium)
+        b.titleLabel?.adjustsFontSizeToFitWidth = true
+        b.titleLabel?.minimumScaleFactor = 0.6
         b.layer.cornerRadius = 8
         b.addTarget(self, action: #selector(keyTapped(_:)), for: .touchUpInside)
-        keyButtons.append(b)
+        if InputPanel.functionTitles.contains(title) {
+            funcButtons.append(b)
+        } else {
+            keyButtons.append(b)
+        }
         return b
     }
 
@@ -409,7 +519,7 @@ final class InputPanel: UIView, UITextFieldDelegate {
         for title in titles {
             row.addArrangedSubview(makeKey(title))
         }
-        row.heightAnchor.constraint(equalToConstant: 40).isActive = true
+        row.heightAnchor.constraint(equalToConstant: 42).isActive = true
         keyArea.addArrangedSubview(row)
     }
 
@@ -419,130 +529,126 @@ final class InputPanel: UIView, UITextFieldDelegate {
             v.removeFromSuperview()
         }
         keyButtons.removeAll()
+        funcButtons.removeAll()
+        let rows: [[String]]
         switch mode {
-        case 1:
-            for row in InputPanel.abcRows {
-                var titles: [String] = []
-                for ch in row {
-                    titles.append(upper ? String(ch).uppercased() : String(ch))
-                }
-                addRow(titles)
-            }
-            addRow(["⇧", ".", "/", ":", "-", "_", "@", ".com", ".jp"])
-        case 2:
-            for row in InputPanel.symbolRows {
-                addRow(row)
-            }
-        default:
-            for row in InputPanel.kanaRows {
-                var titles: [String] = []
-                for ch in row {
-                    titles.append(katakana ? toKatakana(String(ch)) : String(ch))
-                }
-                addRow(titles)
-            }
-            addRow(["゛゜", "小", katakana ? "ひらがな" : "カタカナ", "。", "？", "！"])
+        case 1: rows = InputPanel.abcRows
+        case 2: rows = InputPanel.numRows
+        default: rows = InputPanel.kanaRows
         }
-        addRow(["かな", "ABC", "123", "空白", "⌫"])
+        for row in rows {
+            var titles: [String] = []
+            for key in row {
+                if key == "カナ" {
+                    titles.append(katakana ? "ひらがな" : "カタカナ")
+                } else if mode == 1 && key.count == 1, let ch = key.first, ch.isLetter {
+                    titles.append(upper ? key.uppercased() : key)
+                } else {
+                    titles.append(key)
+                }
+            }
+            addRow(titles)
+        }
         applyTheme()
         superview?.setNeedsLayout()
     }
 
     // MARK: 文字の処理
 
-    private func toKatakana(_ s: String) -> String {
-        var out = String.UnicodeScalarView()
-        for u in s.unicodeScalars {
-            if u.value >= 0x3041 && u.value <= 0x3096, let k = Unicode.Scalar(u.value + 0x60) {
-                out.append(k)
-            } else {
-                out.append(u)
-            }
-        }
-        return String(out)
+    private func preview() -> String {
+        let (k, rest) = RomajiKana.convert(romaji)
+        return (katakana ? RomajiKana.toKatakana(k) : k) + rest
     }
 
-    private func toHiragana(_ s: String) -> String {
-        var out = String.UnicodeScalarView()
-        for u in s.unicodeScalars {
-            if u.value >= 0x30A1 && u.value <= 0x30F6, let h = Unicode.Scalar(u.value - 0x60) {
-                out.append(h)
-            } else {
-                out.append(u)
-            }
+    /// ローマ字の未確定分をかなにして確定する（末尾の n は ん）
+    private func flushRomaji() {
+        guard !romaji.isEmpty else { return }
+        let (k, rest) = RomajiKana.convert(romaji)
+        var add = katakana ? RomajiKana.toKatakana(k) : k
+        if rest == "n" {
+            add += katakana ? "ン" : "ん"
+        } else {
+            add += rest
         }
-        return String(out)
+        committed += add
+        romaji = ""
     }
 
-    /// 最後の1文字を、表の順に次の文字へ切り替える（濁点・半濁点・小さい字）
-    private func cycleLast(_ text: String, _ cycles: [String]) -> String {
-        guard let last = text.last else { return text }
-        let lastString = String(last)
-        // カタカナはひらがなに直して表を引き、結果をカタカナへ戻す
-        let hira = toHiragana(lastString)
-        let wasKatakana = hira != lastString
-        for cycle in cycles {
-            let chars = Array(cycle)
-            for (i, ch) in chars.enumerated() where String(ch) == hira {
-                let next = String(chars[(i + 1) % chars.count])
-                return String(text.dropLast()) + (wasKatakana ? toKatakana(next) : next)
-            }
-        }
-        return text
+    private func updateField() {
+        settingProgrammatically = true
+        field.text = committed + preview()
+        settingProgrammatically = false
+        onChange?(field.text ?? "")
+    }
+
+    private func switchMode(_ m: Int) {
+        flushRomaji()
+        mode = m
+        if m != 1 { upper = false }
+        rebuildKeys()
     }
 
     @objc private func keyTapped(_ sender: UIButton) {
         let key = sender.title(for: .normal) ?? ""
-        var text = field.text ?? ""
         switch key {
         case "⌫":
-            if !text.isEmpty { text.removeLast() }
+            if !romaji.isEmpty {
+                romaji.removeLast()
+            } else if !committed.isEmpty {
+                committed.removeLast()
+            }
+            updateField()
         case "空白":
-            text += " "
-        case "゛゜":
-            text = cycleLast(text, InputPanel.voicedCycles)
-        case "小":
-            text = cycleLast(text, InputPanel.smallCycles)
-        case "カタカナ", "ひらがな":
-            katakana.toggle()
-            rebuildKeys()
-            return
+            flushRomaji()
+            committed += " "
+            updateField()
         case "⇧":
             upper.toggle()
             rebuildKeys()
-            return
+        case "カタカナ", "ひらがな":
+            katakana.toggle()
+            rebuildKeys()
+            updateField()
         case "かな":
-            mode = 0
-            rebuildKeys()
-            return
+            switchMode(0)
         case "ABC":
-            mode = 1
-            rebuildKeys()
-            return
+            switchMode(1)
         case "123":
-            mode = 2
-            rebuildKeys()
-            return
+            switchMode(2)
+        case ".com":
+            flushRomaji()
+            committed += ".com"
+            updateField()
         default:
-            text += key
+            if mode == 0, key.count == 1, let ch = key.first, ch.isLetter, ch.isLowercase {
+                romaji += key
+                updateField()
+            } else {
+                flushRomaji()
+                committed += key
+                updateField()
+            }
         }
-        field.text = text
-        onChange?(text)
     }
 
     @objc private func fieldEdited() {
+        if settingProgrammatically { return }
+        // システムのキーボードで直接打たれたときは、その内容を正とする
+        committed = field.text ?? ""
+        romaji = ""
         onChange?(field.text ?? "")
     }
 
     @objc private func pasteTapped() {
         guard let pasted = UIPasteboard.general.string, !pasted.isEmpty else { return }
-        let text = (field.text ?? "") + pasted
-        field.text = text
-        onChange?(text)
+        flushRomaji()
+        committed += pasted
+        updateField()
     }
 
     @objc private func submitTapped() {
-        onSubmit?(field.text ?? "")
+        flushRomaji()
+        onSubmit?(committed)
     }
 
     @objc private func closeTapped() {
@@ -550,11 +656,14 @@ final class InputPanel: UIView, UITextFieldDelegate {
     }
 
     func textFieldShouldReturn(_ textField: UITextField) -> Bool {
-        onSubmit?(textField.text ?? "")
+        flushRomaji()
+        onSubmit?(committed)
         return false
     }
 
     func textFieldShouldClear(_ textField: UITextField) -> Bool {
+        committed = ""
+        romaji = ""
         onChange?("")
         return true
     }
