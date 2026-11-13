@@ -39,6 +39,11 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate {
     private var conflictNotified = false
     private var confirmUntil: CFTimeInterval = 0
     private var starterButton: UIButton?
+    private var furnitureButton: UIButton?
+    private var furnitureOn = true
+    private var furnitureLoaded = false
+    private let furnitureOffKey = "kukan.furniture.off"
+    private let launchKey = "kukan.launching"
     private let inputPanel = InputPanel(frame: .zero)
     private weak var inputMonitor: MonitorView?   // アプリ内キーボードの入力先
     private var inputIsURL = false
@@ -170,8 +175,6 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate {
         sceneryView.layer.addSublayer(starLayer)
         sceneryView.layer.addSublayer(theaterDim)
         view.addSubview(sceneryView)
-        // 家具などの3D。床の格子より手前、モニターより奥に描く
-        view.addSubview(space3D.view)
 
         // 何もない所へのタッチは touchView、モニターへのタッチは上に重ねた worldView が受ける
         view.addSubview(touchView)
@@ -258,10 +261,18 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate {
 
         makeStars()
         loadMonitors()
-        if !space3D.load() {
-            space3D.starterLayout()
-            space3D.save()
+
+        // 安全モード：前回の起動がすぐに終わっていた（落ちた）なら、3Dの家具を止めて起動する
+        let crashedLastTime = defaults.bool(forKey: launchKey)
+        if crashedLastTime {
+            defaults.set(true, forKey: furnitureOffKey)
         }
+        defaults.set(true, forKey: launchKey)
+        Task {
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            UserDefaults.standard.set(false, forKey: self.launchKey)
+        }
+        setFurnitureOn(!defaults.bool(forKey: furnitureOffKey))
         applyTheme()
         updateSettingTitles()
 
@@ -270,6 +281,10 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate {
             motion.startDeviceMotionUpdates(using: .xArbitraryZVertical)
         } else {
             showToast("この端末では動きを取得できません。指でドラッグして見回せます。")
+        }
+
+        if crashedLastTime {
+            showToast("前回の起動ですぐ終了したため、3Dの家具を止めて起動しました。メニューの「デザイン」→「3D家具」でオンに戻せます。")
         }
 
         let l = CADisplayLink(target: self, selector: #selector(tick))
@@ -364,6 +379,9 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate {
             makeHUDButton("片付ける", primary: false, action: #selector(deleteFurniture)),
             starter
         ]
+        let furnitureB = makeHUDButton("3D家具：オン", primary: false, action: #selector(toggleFurniture))
+        furnitureButton = furnitureB
+        let designRow3: [UIButton] = [furnitureB]
 
         // 「空間」のページ
         let theme = makeHUDButton("空間：" + Palette.theme.name, primary: false, action: #selector(nextTheme))
@@ -389,7 +407,7 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate {
 
         pages = [
             makePage([monitorRow1, monitorRow2, monitorRow3]),
-            makePage([designRow1, designRow2]),
+            makePage([designRow1, designRow2, designRow3]),
             makePage([spaceRow1, spaceRow2]),
             makePage([controlRow1, controlRow2])
         ]
@@ -1131,7 +1149,7 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate {
             frameCount += 1
             if hit != nil {
                 if space3D.hovered != nil { space3D.hovered = nil }
-            } else if frameCount % 3 == 0 {
+            } else if furnitureOn && frameCount % 3 == 0 {
                 let b = view.bounds
                 let f = space3D.furniture(at: CGPoint(x: b.midX, y: b.midY))
                 if f !== space3D.hovered {
@@ -1664,6 +1682,36 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate {
         space3D.grabbed ?? space3D.hovered
     }
 
+    /// 3Dの家具を表示する／止める（止めている間は3D描画を行わない）
+    private func setFurnitureOn(_ on: Bool) {
+        furnitureOn = on
+        UserDefaults.standard.set(!on, forKey: furnitureOffKey)
+        if on {
+            if space3D.view.superview == nil {
+                // 床の格子より手前、モニターより奥に描く
+                view.insertSubview(space3D.view, aboveSubview: sceneryView)
+                space3D.view.frame = view.bounds
+            }
+            if !furnitureLoaded {
+                furnitureLoaded = true
+                if !space3D.load() {
+                    space3D.starterLayout()
+                    space3D.save()
+                }
+            }
+        } else {
+            space3D.hovered = nil
+            space3D.grabbed = nil
+            space3D.view.removeFromSuperview()
+        }
+        setTitle(furnitureButton, on ? "3D家具：オン" : "3D家具：オフ")
+    }
+
+    @objc private func toggleFurniture() {
+        setFurnitureOn(!furnitureOn)
+        showToast(furnitureOn ? "3Dの家具を表示しました。" : "3Dの家具を止めました（動きが軽くなります）。")
+    }
+
     private func needFurniture() -> FurnitureItem? {
         if let f = furnitureTarget { return f }
         showToast("家具に中央の照準を合わせてください（選ばれると足元に輪が出ます）。")
@@ -1694,7 +1742,7 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate {
             if id.hasPrefix("furniture:") {
                 self.addFurniture(String(id.dropFirst("furniture:".count)))
             } else if id.hasPrefix("screen:") {
-                self.callBigScreen(String(id.dropFirst("screen:".count)))
+                self.placeBigScreen(String(id.dropFirst("screen:".count)))
             }
         }
         view.addSubview(panel)
@@ -1710,6 +1758,7 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate {
 
     /// 見ている床の上に家具を置き、こちらを向ける
     private func addFurniture(_ kind: String) {
+        if !furnitureOn { setFurnitureOn(true) }
         if space3D.items.count >= 60 {
             showToast("家具は60個までです。不要なものを片付けてください。")
             return
@@ -1735,11 +1784,11 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate {
     }
 
     @objc private func callBigScreen() {
-        callBigScreen("https://www.youtube.com/")
+        placeBigScreen("https://www.youtube.com/")
     }
 
     /// 前方の遠くに、横長の大きな画面を置く
-    private func callBigScreen(_ urlString: String) {
+    private func placeBigScreen(_ urlString: String) {
         guard monitors.count < maxMonitors, let url = URL(string: urlString) else {
             showToast("モニターは\(maxMonitors)枚までです。不要なものを削除してください。")
             return
@@ -1811,6 +1860,7 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate {
         }
         confirmUntil = 0
         setTitle(starterButton, "おすすめ配置")
+        if !furnitureOn { setFurnitureOn(true) }
         space3D.starterLayout()
         space3D.save()
         showToast("おすすめの配置にしました。")

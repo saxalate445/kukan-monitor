@@ -403,12 +403,12 @@ final class SpaceScene {
 
     /// 空間のカメラに合わせる。rotation はカメラ→空間の回転（y上向き）、position は空間の座標（y下向き）。
     func setCamera(rotation r: Mat3, position p: Vec3) {
-        let m = SCNMatrix4(
-            m11: Float(r.r[0][0]), m12: Float(r.r[1][0]), m13: Float(r.r[2][0]), m14: 0,
-            m21: Float(r.r[0][1]), m22: Float(r.r[1][1]), m23: Float(r.r[2][1]), m24: 0,
-            m31: Float(r.r[0][2]), m32: Float(r.r[1][2]), m33: Float(r.r[2][2]), m34: 0,
-            m41: Float(p.x), m42: Float(-p.y), m43: Float(p.z), m44: 1)
-        cameraNode.transform = m
+        // 列ごとに：カメラの右・上・後ろ向きの軸（空間の座標）と、カメラの位置
+        cameraNode.simdTransform = simd_float4x4(columns: (
+            SIMD4<Float>(Float(r.r[0][0]), Float(r.r[1][0]), Float(r.r[2][0]), 0),
+            SIMD4<Float>(Float(r.r[0][1]), Float(r.r[1][1]), Float(r.r[2][1]), 0),
+            SIMD4<Float>(Float(r.r[0][2]), Float(r.r[1][2]), Float(r.r[2][2]), 0),
+            SIMD4<Float>(Float(p.x), Float(-p.y), Float(p.z), 1)))
     }
 
     /// モニターと同じ遠近感（焦点距離 perspective）になるよう、縦の画角を合わせる
