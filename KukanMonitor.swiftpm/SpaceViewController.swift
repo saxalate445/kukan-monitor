@@ -7,7 +7,7 @@ import SceneKit
 
 // MARK: - 空間全体
 
-final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate {
+final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, UIPencilInteractionDelegate {
     // 背景
     private let cameraView = UIView()
     private let sceneryView = UIView()
@@ -40,6 +40,40 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate {
     private var confirmUntil: CFTimeInterval = 0
     private var starterButton: UIButton?
     private var furnitureButton: UIButton?
+
+    // ペン（Apple Pencil）
+    private enum PenTarget {
+        case board(MonitorView)
+        case air
+    }
+    private enum PenAction {
+        case board(MonitorView)
+        case air(AirStroke)
+    }
+    private var penColor = 0
+    private var penWidth = 1                 // 0: 細, 1: 中, 2: 太
+    private var penDepth = 1                 // 空中に描く距離 0: 近く, 1: 中くらい, 2: 遠く
+    private var penEraser = false
+    private var penTarget: PenTarget?
+    private var pendingPenTarget: PenTarget?
+    private var penErased = false
+    private var currentAir: AirStroke?
+    private var airPlanePoint = Vec3(0, 0, 0)
+    private var airPlaneNormal = Vec3(0, 0, -1)
+    private var penHistory: [PenAction] = []
+    private var penColorButton: UIButton?
+    private var penWidthButton: UIButton?
+    private var penDepthButton: UIButton?
+    private var penEraserButton: UIButton?
+    private var clearAirButton: UIButton?
+    private var clearAirConfirmUntil: CFTimeInterval = 0
+    private let penWidthNames = ["細", "中", "太"]
+    private let boardWidths: [CGFloat] = [2.5, 5, 10]
+    private let airWidths: [Double] = [5, 10, 20]
+    private let penDepthNames = ["近く", "中くらい", "遠く"]
+    private let airDepths: [Double] = [600, 1000, 1700]
+    private let penColorKey = "kukan.pen.color"
+    private let penWidthKey = "kukan.pen.width"
     private var furnitureOn = true
     private var furnitureLoaded = false
     private let furnitureOffKey = "kukan.furniture.off"
@@ -52,7 +86,7 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate {
     private let menuButton = UIButton(type: .system)
     private let menuPanel = UIStackView()
     private let helpLabel = UILabel()
-    private let tabs = UISegmentedControl(items: ["モニター", "デザイン", "空間", "操作"])
+    private let tabs = UISegmentedControl(items: ["モニター", "デザイン", "ペン", "空間", "操作"])
     private var pages: [UIStackView] = []
     private var hudButtons: [(button: UIButton, primary: Bool)] = []
     private var themeButton: UIButton?
@@ -155,6 +189,10 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate {
             touchMode = min(2, max(0, defaults.integer(forKey: touchModeKey)))
         }
         audioFocus = defaults.bool(forKey: audioKey)
+        penColor = PenPalette.index(defaults.integer(forKey: penColorKey))
+        if defaults.object(forKey: penWidthKey) != nil {
+            penWidth = min(2, max(0, defaults.integer(forKey: penWidthKey)))
+        }
         // ほかのモニターや他のアプリの音と混ぜて再生する（1つの再生でほかが止まらないように）
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback, options: [.mixWithOthers])
         try? AVAudioSession.sharedInstance().setActive(true)
@@ -193,6 +231,10 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate {
         let rotate = UIRotationGestureRecognizer(target: self, action: #selector(handleRotate(_:)))
         rotate.delegate = self
         touchView.addGestureRecognizer(rotate)
+        // 見回しなどは指だけ。Apple Pencil は「書く」に使う
+        for g in touchView.gestureRecognizers ?? [] {
+            g.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        }
 
         reticle.isUserInteractionEnabled = false
         reticle.layer.borderWidth = 2
@@ -284,8 +326,22 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate {
         }
 
         if crashedLastTime {
-            showToast("前回の起動ですぐ終了したため、3Dの家具を止めて起動しました。メニューの「デザイン」→「3D家具」でオンに戻せます。")
+            showToast("前回の起動ですぐ終了したため、3D表示を止めて起動しました。メニューの「デザイン」→「3D表示」でオンに戻せます。")
         }
+
+        // Apple Pencil：ホワイトボードや空中に書く。ボタンやメニューの上では書かずに、そのまま押せる
+        let pencil = PencilStrokeRecognizer(target: self, action: #selector(handlePencil(_:)))
+        pencil.shouldStart = { [weak self] p in
+            guard let self = self else { return false }
+            self.pendingPenTarget = self.findPenTarget(at: p)
+            return self.pendingPenTarget != nil
+        }
+        view.addGestureRecognizer(pencil)
+        // Apple Pencil のダブルタップで、消しゴムに切り替える
+        let pencilInteraction = UIPencilInteraction()
+        pencilInteraction.delegate = self
+        view.addInteraction(pencilInteraction)
+        updatePenTitles()
 
         let l = CADisplayLink(target: self, selector: #selector(tick))
         l.add(to: .main, forMode: .common)
@@ -379,9 +435,30 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate {
             makeHUDButton("片付ける", primary: false, action: #selector(deleteFurniture)),
             starter
         ]
-        let furnitureB = makeHUDButton("3D家具：オン", primary: false, action: #selector(toggleFurniture))
+        let furnitureB = makeHUDButton("3D表示：オン", primary: false, action: #selector(toggleFurniture))
         furnitureButton = furnitureB
         let designRow3: [UIButton] = [furnitureB]
+
+        // 「ペン」のページ（Apple Pencil）
+        let penColorB = makeHUDButton("色", primary: false, action: #selector(nextPenColor))
+        penColorButton = penColorB
+        let penWidthB = makeHUDButton("太さ", primary: false, action: #selector(nextPenWidth))
+        penWidthButton = penWidthB
+        let penDepthB = makeHUDButton("空中の距離", primary: false, action: #selector(nextPenDepth))
+        penDepthButton = penDepthB
+        let penEraserB = makeHUDButton("消しゴム：オフ", primary: false, action: #selector(toggleEraser))
+        penEraserButton = penEraserB
+        let clearAirB = makeHUDButton("空中の線を消す", primary: false, action: #selector(clearAirStrokes))
+        clearAirButton = clearAirB
+        let penRow1: [UIButton] = [
+            makeHUDButton("ホワイトボードを出す", primary: true, action: #selector(addBoard)),
+            penColorB, penWidthB, penDepthB
+        ]
+        let penRow2: [UIButton] = [
+            penEraserB,
+            makeHUDButton("1つ戻す", primary: false, action: #selector(undoPen)),
+            clearAirB
+        ]
 
         // 「空間」のページ
         let theme = makeHUDButton("空間：" + Palette.theme.name, primary: false, action: #selector(nextTheme))
@@ -408,6 +485,7 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate {
         pages = [
             makePage([monitorRow1, monitorRow2, monitorRow3]),
             makePage([designRow1, designRow2, designRow3]),
+            makePage([penRow1, penRow2]),
             makePage([spaceRow1, spaceRow2]),
             makePage([controlRow1, controlRow2])
         ]
@@ -1246,6 +1324,13 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate {
         return (x: camPos.x + d.x / flat * 1500, z: camPos.z + d.z / flat * 1500)
     }
 
+    /// 画面上の点を通る視線の向き（空間の座標、y下向き）
+    private func ray(through point: CGPoint) -> Vec3 {
+        let b = view.bounds
+        let c = Vec3(Double(point.x - b.midX), Double(point.y - b.midY), -perspective).normalized
+        return viewMatrix.applyTransposed(c)
+    }
+
     /// 視点から出る線（空間座標）が、表側から当たるモニターを返す
     private func monitor(alongRay d: Vec3) -> MonitorView? {
         var best: MonitorView?
@@ -1533,6 +1618,7 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate {
         for w in WebAssets.widgets {
             widgetItems.append(LauncherView.Item(title: w.name, url: WebAssets.widgetURLString(w.id)))
         }
+        widgetItems.append(LauncherView.Item(title: "ホワイトボード", url: "board:new"))
         let siteItems: [LauncherView.Item] = [
             LauncherView.Item(title: "YouTube", url: "https://www.youtube.com/"),
             LauncherView.Item(title: "Google", url: "https://www.google.com/"),
@@ -1570,12 +1656,18 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate {
 
     /// 見ている方向に、新しいモニターを置く
     private func addMonitor(_ urlString: String) {
-        guard monitors.count < maxMonitors, let url = URL(string: urlString) else { return }
+        var target = urlString
+        let isNewBoard = urlString == "board:new"
+        if isNewBoard {
+            target = MonitorView.boardURLString(UUID().uuidString)
+        }
+        guard monitors.count < maxMonitors, let url = URL(string: target) else { return }
         let mv = makeMonitor(url: url, yaw: 0, pitch: 0)
         placeMonitor(mv, at: camPos + gazeDir * MonitorView.distance, faceCamera: true)
         saveMonitors()
         if audioFocus { applyAudioFocus() }
-        showToast("見ている方向にモニターを追加しました。")
+        showToast(isNewBoard ? "ホワイトボードを置きました。Apple Pencil で、空間に浮かんだまま書けます。"
+                             : "見ている方向にモニターを追加しました。")
     }
 
     private func makeMonitor(url: URL, yaw: Double, pitch: Double) -> MonitorView {
@@ -1628,6 +1720,7 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate {
         if active === mv { active = nil }
         if gazed === mv { gazed = nil }
         if inputMonitor === mv { closeInputPanel() }
+        if mv.isBoard { mv.deleteBoardData() }
         mv.endEditing(true)
         mv.web.stopLoading()
         mv.removeFromSuperview()
@@ -1698,18 +1791,19 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate {
                     space3D.starterLayout()
                     space3D.save()
                 }
+                space3D.loadAir()
             }
         } else {
             space3D.hovered = nil
             space3D.grabbed = nil
             space3D.view.removeFromSuperview()
         }
-        setTitle(furnitureButton, on ? "3D家具：オン" : "3D家具：オフ")
+        setTitle(furnitureButton, on ? "3D表示：オン" : "3D表示：オフ")
     }
 
     @objc private func toggleFurniture() {
         setFurnitureOn(!furnitureOn)
-        showToast(furnitureOn ? "3Dの家具を表示しました。" : "3Dの家具を止めました（動きが軽くなります）。")
+        showToast(furnitureOn ? "3D表示（家具・空中の線）をオンにしました。" : "3D表示（家具・空中の線）を止めました（動きが軽くなります）。")
     }
 
     private func needFurniture() -> FurnitureItem? {
@@ -1914,6 +2008,243 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate {
         applyAudioFocus()
         updateSettingTitles()
         showToast("iPadの制限で、音の出る動画は同時に1つまでのようです。音声フォーカスをオンにしました（見ているモニターの音が出て、ほかは消音で再生を続けます）。")
+    }
+
+    // MARK: ペン（Apple Pencil）
+
+    /// メニューやボタンなどの上では書かない
+    private func penBlocked(at p: CGPoint) -> Bool {
+        guard var v = view.hitTest(p, with: nil) else { return false }
+        let blockers: [UIView?] = [menuPanel, menuGlass, menuButton, inputPanel, launcher, designLauncher,
+                                   radar, walkStick, lookStick]
+        while true {
+            if v is UIControl { return true }
+            if blockers.contains(where: { $0 === v }) { return true }
+            guard let parent = v.superview else { break }
+            v = parent
+        }
+        return false
+    }
+
+    /// ペンを置いた場所に、何を書くか（書かない場所なら nil）
+    private func findPenTarget(at p: CGPoint) -> PenTarget? {
+        if penBlocked(at: p) { return nil }
+        if let f = focused {
+            return f.isBoard ? .board(f) : nil
+        }
+        if let mv = monitor(alongRay: ray(through: p)) {
+            // ホワイトボードの紙の上なら書く。ふつうのモニターの上では、ペンを指と同じように使う
+            guard mv.isBoard, let c = boardPoint(mv, p), c.y >= 0 else { return nil }
+            return .board(mv)
+        }
+        return .air
+    }
+
+    /// 画面上の点を、ホワイトボードの紙の座標にする
+    private func boardPoint(_ mv: MonitorView, _ p: CGPoint) -> CGPoint? {
+        if mv === focused {
+            return mv.board.content.convert(p, from: view)
+        }
+        let d = ray(through: p)
+        let f = frame(of: mv)
+        let k = d.dot(f.front)
+        if k > -0.01 { return nil }
+        let t = (f.center - camPos).dot(f.front) / k
+        if t <= 0 { return nil }
+        let q = camPos + d * t - f.center
+        let x = q.dot(f.right) / mv.scale + Double(mv.spaceSize.width) / 2
+        let y = q.dot(f.down) / mv.scale + Double(mv.spaceSize.height) / 2
+        return CGPoint(x: x, y: y - Double(MonitorView.barHeight))
+    }
+
+    @objc private func handlePencil(_ g: PencilStrokeRecognizer) {
+        let samples = g.takeSamples()
+        switch g.state {
+        case .began:
+            penTarget = pendingPenTarget
+            penErased = false
+            if !penEraser { beginPen(samples.first) }
+            applyPen(samples)
+        case .changed:
+            applyPen(samples)
+        case .ended:
+            applyPen(samples)
+            endPen()
+        default:
+            endPen()
+        }
+    }
+
+    private func beginPen(_ first: (point: CGPoint, force: CGFloat)?) {
+        guard let target = penTarget, let s = first else { return }
+        switch target {
+        case .board(let mv):
+            if let c = boardPoint(mv, s.point) {
+                mv.board.beginStroke(at: c, color: penColor, baseWidth: boardWidths[penWidth], force: s.force)
+            }
+        case .air:
+            if !furnitureOn { setFurnitureOn(true) }
+            // 描きはじめの視線に垂直な面の上に描く（面までの距離は「空中の距離」）
+            airPlaneNormal = gazeDir
+            airPlanePoint = camPos + gazeDir * airDepths[penDepth]
+            currentAir = space3D.beginAirStroke(color: penColor)
+        }
+    }
+
+    private func applyPen(_ samples: [(point: CGPoint, force: CGFloat)]) {
+        guard let target = penTarget else { return }
+        switch target {
+        case .board(let mv):
+            for s in samples {
+                guard let c = boardPoint(mv, s.point) else { continue }
+                if penEraser {
+                    if mv.board.erase(near: c, radius: 16) { penErased = true }
+                } else {
+                    mv.board.addPoint(c, force: s.force)
+                }
+            }
+            if !penEraser { mv.board.refreshCurrent() }
+        case .air:
+            if penEraser {
+                for s in samples {
+                    if let st = space3D.airStroke(nearScreen: s.point, radius: 26) {
+                        space3D.removeAirStroke(st)
+                        penErased = true
+                    }
+                }
+                return
+            }
+            guard let st = currentAir else { return }
+            for s in samples {
+                let d = ray(through: s.point)
+                let k = d.dot(airPlaneNormal)
+                if k < 0.05 { continue }
+                let t = (airPlanePoint - camPos).dot(airPlaneNormal) / k
+                space3D.addAirPoint(st, camPos + d * t, radius: airWidths[penWidth] * (0.5 + Double(s.force) * 1.5))
+            }
+            space3D.refreshAir(st)
+        }
+    }
+
+    private func endPen() {
+        defer {
+            penTarget = nil
+            currentAir = nil
+        }
+        guard let target = penTarget else { return }
+        if penEraser {
+            if penErased, case .air = target { space3D.saveAir() }
+            return
+        }
+        switch target {
+        case .board(let mv):
+            if mv.board.endStroke() { penHistory.append(.board(mv)) }
+        case .air:
+            if let st = currentAir {
+                if st.points.isEmpty {
+                    space3D.removeAirStroke(st)
+                } else {
+                    space3D.refreshAir(st)
+                    space3D.saveAir()
+                    penHistory.append(.air(st))
+                }
+            }
+        }
+        if penHistory.count > 300 {
+            penHistory.removeFirst(penHistory.count - 300)
+        }
+    }
+
+    @objc private func undoPen() {
+        while let last = penHistory.popLast() {
+            switch last {
+            case .board(let mv):
+                if monitors.contains(where: { $0 === mv }) {
+                    mv.board.undo()
+                    return
+                }
+            case .air(let st):
+                if space3D.airStrokes.contains(where: { $0 === st }) {
+                    space3D.removeAirStroke(st)
+                    space3D.saveAir()
+                    return
+                }
+            }
+        }
+        showToast("戻せる線がありません。")
+    }
+
+    @objc private func addBoard() {
+        if monitors.count >= maxMonitors {
+            showToast("モニターは\(maxMonitors)枚までです。不要なものを削除してください。")
+            return
+        }
+        addMonitor("board:new")
+    }
+
+    @objc private func nextPenColor() {
+        penColor = PenPalette.index(penColor + 1)
+        UserDefaults.standard.set(penColor, forKey: penColorKey)
+        if penEraser { penEraser = false }
+        updatePenTitles()
+    }
+
+    @objc private func nextPenWidth() {
+        penWidth = (penWidth + 1) % penWidthNames.count
+        UserDefaults.standard.set(penWidth, forKey: penWidthKey)
+        updatePenTitles()
+    }
+
+    @objc private func nextPenDepth() {
+        penDepth = (penDepth + 1) % penDepthNames.count
+        updatePenTitles()
+    }
+
+    @objc private func toggleEraser() {
+        penEraser.toggle()
+        updatePenTitles()
+        showToast(penEraser ? "消しゴムにしました。なぞった線が消えます。" : "ペンに戻しました。")
+    }
+
+    /// Apple Pencil（第2世代など）のダブルタップ
+    func pencilInteractionDidTap(_ interaction: UIPencilInteraction) {
+        toggleEraser()
+    }
+
+    /// 空中の線をすべて消す（取り消せないので2回押しで確定）
+    @objc private func clearAirStrokes() {
+        let now = CACurrentMediaTime()
+        if now > clearAirConfirmUntil {
+            clearAirConfirmUntil = now + 3
+            setTitle(clearAirButton, "もう一度で全部消す")
+            Task {
+                try? await Task.sleep(nanoseconds: 3_100_000_000)
+                if CACurrentMediaTime() >= self.clearAirConfirmUntil {
+                    self.setTitle(self.clearAirButton, "空中の線を消す")
+                }
+            }
+            return
+        }
+        clearAirConfirmUntil = 0
+        setTitle(clearAirButton, "空中の線を消す")
+        space3D.clearAir()
+        space3D.saveAir()
+        penHistory.removeAll { action in
+            if case .air = action { return true }
+            return false
+        }
+        showToast("空中の線をすべて消しました。")
+    }
+
+    private func updatePenTitles() {
+        var config = penColorButton?.configuration
+        config?.title = "色：" + PenPalette.colors[penColor].name
+        config?.image = UIImage(systemName: "circle.fill")?.withTintColor(PenPalette.color(penColor), renderingMode: .alwaysOriginal)
+        config?.imagePadding = 6
+        penColorButton?.configuration = config
+        setTitle(penWidthButton, "太さ：" + penWidthNames[penWidth])
+        setTitle(penDepthButton, "空中の距離：" + penDepthNames[penDepth])
+        setTitle(penEraserButton, penEraser ? "消しゴム：オン" : "消しゴム：オフ")
     }
 
     // MARK: AR（カメラ背景）

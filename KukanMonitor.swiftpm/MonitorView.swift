@@ -12,6 +12,14 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
         (name: "正方形", size: CGSize(width: 640, height: 640))
     ]
     static let distance: Double = 1100
+    /// 上部のバーの高さ
+    static let barHeight: CGFloat = 52
+    /// ホワイトボード用の、実在しない専用アドレス
+    static let boardHost = "boards.kukan.invalid"
+
+    static func boardURLString(_ id: String) -> String {
+        "https://" + boardHost + "/" + id
+    }
 
     var shape = 0
     var spaceSize: CGSize { MonitorView.shapes[shape % MonitorView.shapes.count].size }
@@ -50,6 +58,14 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
     private(set) var lastWebSecure = false
 
     private let homeURL: URL
+    /// ホワイトボードの紙（ホワイトボードのときだけ表示）
+    let board = BoardCanvasView()
+    private(set) var boardID: String?
+    var isBoard: Bool { boardID != nil }
+    private var webOnlyButtons: [UIButton] = []
+    private var boardButtons: [UIButton] = []
+    private var clearButton: UIButton?
+    private var clearConfirmUntil: CFTimeInterval = 0
     private let bar = UIStackView()
     private let field = UITextField()
     private let muteBadge = UIImageView(image: UIImage(systemName: "speaker.slash.fill"))
@@ -95,6 +111,8 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
         web.uiDelegate = self
         web.allowsBackForwardNavigationGestures = true
         addSubview(web)
+        board.isHidden = true
+        addSubview(board)
 
         muteBadge.tintColor = UIColor.white
         muteBadge.backgroundColor = UIColor(white: 0, alpha: 0.6)
@@ -110,11 +128,11 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
         bar.overrideUserInterfaceStyle = .dark
         addSubview(bar)
 
-        bar.addArrangedSubview(makeButton(symbol: "chevron.left", title: nil, action: #selector(goBack)))
-        bar.addArrangedSubview(makeButton(symbol: "chevron.right", title: nil, action: #selector(goForward)))
-        bar.addArrangedSubview(makeButton(symbol: "arrow.clockwise", title: nil, action: #selector(reload)))
-        bar.addArrangedSubview(makeButton(symbol: "minus.magnifyingglass", title: nil, action: #selector(zoomOut)))
-        bar.addArrangedSubview(makeButton(symbol: "plus.magnifyingglass", title: nil, action: #selector(zoomIn)))
+        addWebOnly(makeButton(symbol: "chevron.left", title: nil, action: #selector(goBack)))
+        addWebOnly(makeButton(symbol: "chevron.right", title: nil, action: #selector(goForward)))
+        addWebOnly(makeButton(symbol: "arrow.clockwise", title: nil, action: #selector(reload)))
+        addWebOnly(makeButton(symbol: "minus.magnifyingglass", title: nil, action: #selector(zoomOut)))
+        addWebOnly(makeButton(symbol: "plus.magnifyingglass", title: nil, action: #selector(zoomIn)))
 
         field.borderStyle = .none
         field.backgroundColor = UIColor(white: 0, alpha: 0.3)
@@ -135,8 +153,17 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
         field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         bar.addArrangedSubview(field)
 
-        bar.addArrangedSubview(makeButton(symbol: "keyboard", title: nil, action: #selector(keyboardTapped)))
-        bar.addArrangedSubview(makeButton(symbol: "play.rectangle.fill", title: nil, action: #selector(fillTapped)))
+        addWebOnly(makeButton(symbol: "keyboard", title: nil, action: #selector(keyboardTapped)))
+        addWebOnly(makeButton(symbol: "play.rectangle.fill", title: nil, action: #selector(fillTapped)))
+        // ホワイトボード用：1つ戻す・全部消す
+        let undoB = makeButton(symbol: "arrow.uturn.backward", title: nil, action: #selector(boardUndoTapped))
+        let clearB = makeButton(symbol: nil, title: "全部消す", action: #selector(boardClearTapped))
+        clearButton = clearB
+        for b in [undoB, clearB] {
+            b.isHidden = true
+            boardButtons.append(b)
+            bar.addArrangedSubview(b)
+        }
         let maximize = makeButton(symbol: "arrow.up.left.and.arrow.down.right", title: nil, action: #selector(maximizeTapped))
         bar.addArrangedSubview(maximize)
         maximizeButton = maximize
@@ -181,9 +208,12 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
         super.layoutSubviews()
         let w = bounds.width, h = bounds.height
         // 上部のバーを隠しているときは、ページを枠いっぱいに広げる
-        let top: CGFloat = bar.isHidden ? 0 : 52
+        let top: CGFloat = bar.isHidden ? 0 : MonitorView.barHeight
         bar.frame = CGRect(x: 14, y: 6, width: max(0, w - 28), height: 40)
         web.frame = CGRect(x: 0, y: top, width: w, height: max(0, h - top))
+        board.frame = web.frame
+        // 紙の大きさは「空間に置いたときの大きさ」で固定し、手元に開いたときは拡大する
+        board.logicalSize = CGSize(width: spaceSize.width, height: spaceSize.height - MonitorView.barHeight)
         muteBadge.frame = CGRect(x: w - 48, y: h - 48, width: 36, height: 36)
     }
 
@@ -191,6 +221,23 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
 
     /// URLを開く。内蔵ウィジェットのアドレスなら、アプリ内のHTMLを表示する。
     func load(_ url: URL) {
+        if url.host == MonitorView.boardHost {
+            // ホワイトボード：ページは読み込まず、紙を表示する
+            let id = url.lastPathComponent
+            boardID = id
+            board.load(id: id)
+            board.isHidden = false
+            web.isHidden = true
+            field.text = "ホワイトボード（Apple Pencil で書けます）"
+            field.isEnabled = false
+            for b in webOnlyButtons {
+                b.isHidden = true
+            }
+            for b in boardButtons {
+                b.isHidden = false
+            }
+            return
+        }
         if let id = WebAssets.widgetID(for: url), let html = WebAssets.widgetHTML(id) {
             field.text = WebAssets.widgetName(id) + "（ウィジェット）"
             web.loadHTMLString(html, baseURL: url)
@@ -330,6 +377,37 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
     @objc private func maximizeTapped() { onMaximize?() }
     @objc private func shapeTapped() { onShape?() }
     @objc private func deleteTapped() { onDelete?() }
+
+    private func addWebOnly(_ b: UIButton) {
+        webOnlyButtons.append(b)
+        bar.addArrangedSubview(b)
+    }
+
+    @objc private func boardUndoTapped() { board.undo() }
+
+    /// 全部消す（取り消せないので2回押しで確定）
+    @objc private func boardClearTapped() {
+        let now = CACurrentMediaTime()
+        if now > clearConfirmUntil {
+            clearConfirmUntil = now + 3
+            clearButton?.setTitle("もう一度で消去", for: .normal)
+            Task {
+                try? await Task.sleep(nanoseconds: 3_100_000_000)
+                if CACurrentMediaTime() >= self.clearConfirmUntil {
+                    self.clearButton?.setTitle("全部消す", for: .normal)
+                }
+            }
+            return
+        }
+        clearConfirmUntil = 0
+        clearButton?.setTitle("全部消す", for: .normal)
+        board.clear()
+    }
+
+    /// ボードを削除するときに、書いた線の保存も消す
+    func deleteBoardData() {
+        board.deleteData()
+    }
 
     // MARK: 文字入力
 

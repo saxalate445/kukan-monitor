@@ -323,6 +323,9 @@ final class SpaceScene {
     private let ring = SCNNode()
     private(set) var items: [FurnitureItem] = []
     private let saveKey = "kukan.furniture.v1"
+    /// Apple Pencil で空中に描いた線（Pen.swift）
+    let airRoot = SCNNode()
+    var airStrokes: [AirStroke] = []
 
     /// 照準が乗っている家具（足元に輪を出す）
     var hovered: FurnitureItem? {
@@ -385,6 +388,7 @@ final class SpaceScene {
         scene.rootNode.addChildNode(floorNode)
 
         scene.rootNode.addChildNode(furnitureRoot)
+        scene.rootNode.addChildNode(airRoot)
 
         // 選んでいる家具の足元に出す輪
         let torus = SCNTorus(ringRadius: 300, pipeRadius: 6)
