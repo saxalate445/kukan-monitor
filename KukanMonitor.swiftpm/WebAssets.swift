@@ -159,7 +159,8 @@ enum WebAssets {
     ['pointerdown', 'touchstart', 'mousedown', 'keydown'].forEach(function (t) {
       document.addEventListener(t, function () { lastUser = Date.now(); }, true);
     });
-    K.keepPlaying = true;
+    // 自動再開は使わない（iPad 通常の動き）。アプリから明示的に呼んだときだけ再開する
+    K.keepPlaying = false;
     function resume(m) {
       var now = Date.now();
       m.__kukanResumes = (m.__kukanResumes || []).filter(function (t) { return now - t < 10000; });

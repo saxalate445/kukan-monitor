@@ -199,6 +199,12 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
             touchMode = min(2, max(0, defaults.integer(forKey: touchModeKey)))
         }
         audioFocus = defaults.bool(forKey: audioKey)
+        // 前の版で自動的にオンになった音声フォーカスを、一度だけオフに戻す
+        if !defaults.bool(forKey: "kukan.audiofocus.reset1") {
+            defaults.set(true, forKey: "kukan.audiofocus.reset1")
+            audioFocus = false
+            defaults.set(false, forKey: audioKey)
+        }
         penColor = PenPalette.index(defaults.integer(forKey: penColorKey))
         level = min(1, max(0, defaults.integer(forKey: levelKey)))
         camPos = Vec3(0, levelY(level), 0)
@@ -504,7 +510,7 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
         let spaceRow2: [UIButton] = [radarB, audio]
         let floorB = makeHUDButton("2階へ上がる", primary: false, action: #selector(toggleFloor))
         floorButton = floorB
-        let spaceRow3: [UIButton] = [floorB, makeHUDButton("照明の色", primary: false, action: #selector(openLightPanel))]
+        let spaceRow3: [UIButton] = [floorB, makeHUDButton("空間の色", primary: false, action: #selector(openLightPanel))]
 
         // 「操作」のページ
         let touchB = makeHUDButton("画面操作：最大化", primary: false, action: #selector(toggleTouchMode))
@@ -576,9 +582,7 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
 
     private func applyTheme() {
         let t = Palette.theme
-        backdrop.colors = [t.top.cgColor, t.bottom.cgColor]
-        gridLayer.strokeColor = t.grid.cgColor
-        gridLayer2.strokeColor = t.grid.cgColor
+        applySpaceColors()
         backLayer.strokeColor = t.ink.withAlphaComponent(0.6).cgColor
         backLayer.fillColor = t.ink.withAlphaComponent(0.06).cgColor
         lightPanel.applyTheme()
@@ -696,20 +700,11 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
     /// どこかの画面で再生が始まった。ほかにも再生中の画面があれば、全部を再生し続けられるようにする。
     /// iPad では音の出る動画は同時に1つまでなので、音は今始めた画面から出し、ほかは消音で続ける。
     private func mediaStateChanged(_ mv: MonitorView, _ playing: Bool) {
+        // 自動で消音・切り替えはしない。音声フォーカスを自分でオンにしているときだけ、
+        // 再生を始めた画面の音を出す
         guard playing else { return }
-        let others = monitors.filter { $0 !== mv && $0.playedRecently }
         soundOwner = mv
-        guard !others.isEmpty else { return }
-        if !audioFocus {
-            audioFocus = true
-            UserDefaults.standard.set(true, forKey: audioKey)
-            updateSettingTitles()
-        }
-        applyAudioFocus()
-        if !multiPlayNotified {
-            multiPlayNotified = true
-            showToast("複数の画面で同時に再生中です。iPadでは音の出る動画は1つまでのため、最後に再生した（見ている）画面の音を出し、ほかは消音で再生を続けます。")
-        }
+        if audioFocus { applyAudioFocus() }
     }
 
     /// 直接操作の設定で、タッチに反応するモニターを切り替える（反応するのは常に1枚だけ）
@@ -1326,8 +1321,11 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
                 reticle.layer.borderColor = (hit == nil ? Palette.mute : Palette.accent).cgColor
                 if let h = hit {
                     if touchOne { setActive(h) }
-                    soundOwner = h
-                    if audioFocus { applyAudioFocus() }
+                    // 動画を流していない画面を見ただけでは、音を移さない
+                    if h.playedRecently {
+                        soundOwner = h
+                        if audioFocus { applyAudioFocus() }
+                    }
                 }
                 refreshHighlights()
                 updateTheater()
@@ -2138,13 +2136,8 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
 
     /// 音の出る動画の同時再生がiPadに止められたとき：音声フォーカスに切り替えて、全部を再生し続ける
     private func mediaConflict() {
-        if audioFocus || conflictNotified { return }
+        // 自動で音声フォーカスには切り替えない（通常の動き）
         conflictNotified = true
-        audioFocus = true
-        UserDefaults.standard.set(true, forKey: audioKey)
-        applyAudioFocus()
-        updateSettingTitles()
-        showToast("iPadの制限で、音の出る動画は同時に1つまでのようです。音声フォーカスをオンにしました（見ているモニターの音が出て、ほかは消音で再生を続けます）。")
     }
 
     // MARK: 階と照明
@@ -2163,9 +2156,35 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
                              : "1階に下りました。")
     }
 
+    /// 空・床の方眼・3Dの照明の色をまとめて決める（自分で選んだ色があればその色、なければテーマの色）
+    private func applySpaceColors() {
+        let t = Palette.theme
+        func shade(_ c: UIColor, _ k: CGFloat) -> UIColor {
+            var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+            _ = c.getRed(&r, green: &g, blue: &b, alpha: &a)
+            return UIColor(red: min(1, r * k), green: min(1, g * k), blue: min(1, b * k), alpha: 1)
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if let c = space3D.customLight {
+            let lv = CGFloat(space3D.lightLevel)
+            // 空：上は暗く、地平線に向かって選んだ色に
+            backdrop.colors = [shade(c, 0.22 * lv).cgColor, shade(c, 0.75 * lv).cgColor]
+            let grid = FurnitureFactory.blend(c, UIColor.white, 0.45).withAlphaComponent(0.55)
+            gridLayer.strokeColor = grid.cgColor
+            gridLayer2.strokeColor = grid.cgColor
+        } else {
+            backdrop.colors = [t.top.cgColor, t.bottom.cgColor]
+            gridLayer.strokeColor = t.grid.cgColor
+            gridLayer2.strokeColor = t.grid.cgColor
+        }
+        CATransaction.commit()
+        space3D.applyTheme()
+    }
+
     @objc private func openLightPanel() {
         let t = Palette.theme
-        let color = space3D.customLight ?? FurnitureFactory.blend(t.top, UIColor.white, 0.8)
+        let color = space3D.customLight ?? t.bottom
         lightPanel.set(color: color, level: space3D.lightLevel)
         lightPanel.isHidden = false
         view.bringSubviewToFront(lightPanel)
@@ -2178,7 +2197,7 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
             guard let self = self else { return }
             self.space3D.customLight = color
             self.space3D.lightLevel = level
-            self.space3D.applyTheme()
+            self.applySpaceColors()
             var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
             _ = color.getRed(&r, green: &g, blue: &b, alpha: &a)
             UserDefaults.standard.set([Double(r * 255), Double(g * 255), Double(b * 255), level], forKey: self.lightKey)
@@ -2187,11 +2206,10 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
             guard let self = self else { return }
             self.space3D.customLight = nil
             self.space3D.lightLevel = 1
-            self.space3D.applyTheme()
+            self.applySpaceColors()
             UserDefaults.standard.removeObject(forKey: self.lightKey)
-            let t = Palette.theme
-            self.lightPanel.set(color: FurnitureFactory.blend(t.top, UIColor.white, 0.8), level: 1)
-            self.showToast("照明をテーマの色に戻しました。")
+            self.lightPanel.set(color: Palette.theme.bottom, level: 1)
+            self.showToast("空間の色をテーマの色に戻しました。")
         }
         lightPanel.onClose = { [weak self] in
             self?.lightPanel.isHidden = true

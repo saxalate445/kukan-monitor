@@ -763,7 +763,7 @@ final class LightPanel: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         addSubview(glass)
-        titleLabel.text = "照明の色"
+        titleLabel.text = "空間の色（空・床・照明）"
         titleLabel.font = .systemFont(ofSize: 17, weight: .bold)
         glass.contentView.addSubview(titleLabel)
         swatch.layer.cornerRadius = 12
@@ -874,6 +874,8 @@ final class LightPanel: UIView {
         let x: CGFloat = 20
         let w = bounds.width - 40
         titleLabel.frame = CGRect(x: x, y: 20, width: w - 140, height: 34)
+        titleLabel.adjustsFontSizeToFitWidth = true
+        titleLabel.minimumScaleFactor = 0.7
         swatch.frame = CGRect(x: x + w - 34, y: 20, width: 34, height: 34)
         hexLabel.frame = CGRect(x: x + w - 34 - 96, y: 20, width: 88, height: 34)
         hexLabel.textAlignment = .right
