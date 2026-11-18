@@ -132,8 +132,28 @@
       }, 150);
     }
     K.resume = resume;
+    function post(state) {
+      try { window.webkit.messageHandlers.kukanMedia.postMessage({ state: state }); } catch (_) {}
+    }
+    // ほかの画面で再生が始まった直後に止められた動画を、消音にしてでも再開する（アプリから呼ぶ）
+    K.resumeRecent = function (ms) {
+      var now = Date.now(), n = 0;
+      document.querySelectorAll('video,audio').forEach(function (m) {
+        if (!m.paused || m.ended || !m.__kukanPausedAt) return;
+        if (now - m.__kukanPausedAt > ms) return;
+        if (m.__kukanPausedAt - lastUser < 1500) return;   // この画面で自分で止めた
+        if (K.muted && !m.muted) { m.muted = true; mutedByUs.add(m); }
+        try { var r = m.play(); if (r && r.catch) r.catch(function () {}); } catch (_) {}
+        n++;
+      });
+      return n;
+    };
     document.addEventListener('pause', function (e) {
       var m = e.target;
+      if (m && typeof m.play === 'function') {
+        if (!m.ended) m.__kukanPausedAt = Date.now();
+        post('pause');
+      }
       if (!K.keepPlaying || !m || typeof m.play !== 'function') return;
       if (m.ended || m.seeking) return;
       var now = Date.now();
@@ -144,6 +164,7 @@
     }, true);
     document.addEventListener('play', function (e) {
       if (e.target) e.target.__kukanSysPaused = false;
+      post('play');
     }, true);
   })();
 

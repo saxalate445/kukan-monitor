@@ -16,6 +16,7 @@ struct SavedFurniture: Codable {
     var scale: Double
     var color: Int
     var level: Int?      // 何階に置いたか（0 = 1階）
+    var stored: Bool?
 }
 
 /// 空間に置いた家具1つ
@@ -28,6 +29,7 @@ final class FurnitureItem {
     var scale: Double
     var color: Int
     var level: Int        // 0 = 1階, 1 = 2階
+    var stored = false    // 収納中（空間に出さない）
 
     init(kind: String, node: SCNNode, x: Double, z: Double, rotation: Double, scale: Double, color: Int, level: Int = 0) {
         self.kind = kind
@@ -357,6 +359,8 @@ final class SpaceScene {
         view.antialiasingMode = .multisampling4X
         view.autoenablesDefaultLighting = false
         view.preferredFramesPerSecond = 60
+        // 照明の色などの変更をすぐ画面に出すため、常に描き直す
+        view.rendersContinuously = true
         scene.background.contents = UIColor.clear
 
         let camera = SCNCamera()
@@ -449,7 +453,7 @@ final class SpaceScene {
         let t = Palette.theme
         if let c = customLight {
             // 自分で選んだ照明の色
-            ambient.color = FurnitureFactory.blend(c, UIColor.white, 0.35)
+            ambient.color = FurnitureFactory.blend(c, UIColor.white, 0.15)
             sun.color = c
         } else {
             ambient.color = FurnitureFactory.blend(t.bottom, UIColor.white, 0.55)
@@ -501,7 +505,18 @@ final class SpaceScene {
         item.node.eulerAngles = SCNVector3(0, Float(item.rotation), 0)
         let s = Float(item.scale)
         item.node.scale = SCNVector3(s, s, s)
+        item.node.isHidden = item.stored
         if item === hovered || item === grabbed { updateRing() }
+    }
+
+    /// しまう／出す
+    func setStored(_ item: FurnitureItem, _ on: Bool) {
+        item.stored = on
+        if on {
+            if hovered === item { hovered = nil }
+            if grabbed === item { grabbed = nil }
+        }
+        update(item)
     }
 
     func setColor(_ item: FurnitureItem, _ index: Int) {
@@ -549,7 +564,7 @@ final class SpaceScene {
         var list: [SavedFurniture] = []
         for item in items {
             list.append(SavedFurniture(kind: item.kind, x: item.x, z: item.z, rotation: item.rotation,
-                                       scale: item.scale, color: item.color, level: item.level))
+                                       scale: item.scale, color: item.color, level: item.level, stored: item.stored))
         }
         if let data = try? JSONEncoder().encode(list) {
             UserDefaults.standard.set(data, forKey: saveKey)
@@ -563,8 +578,9 @@ final class SpaceScene {
             return false
         }
         for f in list.prefix(60) {
-            add(kind: f.kind, x: f.x, z: f.z, rotation: f.rotation, scale: min(3, max(0.4, f.scale)), color: f.color,
-                level: min(1, max(0, f.level ?? 0)))
+            let item = add(kind: f.kind, x: f.x, z: f.z, rotation: f.rotation, scale: min(3, max(0.4, f.scale)), color: f.color,
+                           level: min(1, max(0, f.level ?? 0)))
+            if f.stored ?? false { setStored(item, true) }
         }
         return true
     }

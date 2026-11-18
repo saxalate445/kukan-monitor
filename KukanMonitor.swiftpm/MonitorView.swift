@@ -34,6 +34,12 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
     var turn: Double = 0
     /// ほかのモニターと再生を取り合って止められた
     var onMediaConflict: (() -> Void)?
+    /// ページの動画・音声が再生を始めた（true）／止まった（false）
+    var onMediaState: ((Bool) -> Void)?
+    private(set) var mediaPlaying = false
+    private(set) var lastMediaActive: CFTimeInterval = 0
+    /// 収納中（空間には出さない。ページは動いたまま）
+    var stored = false
 
     var onClose: (() -> Void)?
     var onMaximize: (() -> Void)?
@@ -339,6 +345,30 @@ final class MonitorView: UIView, WKNavigationDelegate, WKUIDelegate, UITextField
     /// ページの動画が、ほかのモニターとの取り合いで止められた
     func webMediaConflict() {
         onMediaConflict?()
+    }
+
+    func webMediaState(_ playing: Bool) {
+        if mediaPlaying || playing { lastMediaActive = CACurrentMediaTime() }
+        mediaPlaying = playing
+        onMediaState?(playing)
+    }
+
+    /// 最近まで再生していたか
+    var playedRecently: Bool {
+        mediaPlaying || CACurrentMediaTime() - lastMediaActive < 5
+    }
+
+    /// ほかの画面の再生で止められた直後の動画を、再開する（消音中なら消音のまま）
+    func resumeRecentMedia() {
+        web.evaluateJavaScript("window.__kukan && window.__kukan.resumeRecent(5000)", completionHandler: nil)
+    }
+
+    /// 一覧に出す名前
+    var displayName: String {
+        if isBoard { return "ホワイトボード" }
+        if let id = widgetID { return WebAssets.widgetName(id) }
+        if let t = web.title, !t.isEmpty { return t }
+        return web.url?.host ?? homeURL.host ?? "ページ"
     }
 
     /// ページ側で全画面にされた／戻された、または fill の結果が確定した

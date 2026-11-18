@@ -77,6 +77,7 @@ struct SavedMonitor: Codable {
     var shape: Int?
     var radius: Double?
     var turn: Double?
+    var stored: Bool?
 }
 
 /// 空間の見た目（テーマ）
@@ -295,7 +296,11 @@ final class WeakScriptHandler: NSObject, WKScriptMessageHandler {
     func userContentController(_ userContentController: WKUserContentController,
                                didReceive message: WKScriptMessage) {
         if message.name == "kukanMedia" {
-            owner?.webMediaConflict()
+            if let state = (message.body as? [String: Any])?["state"] as? String {
+                owner?.webMediaState(state == "play")
+            } else {
+                owner?.webMediaConflict()
+            }
             return
         }
         if message.name == "kukanFill" {

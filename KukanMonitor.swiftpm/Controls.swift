@@ -890,3 +890,151 @@ final class LightPanel: UIView {
         closeButton.frame = CGRect(x: x + half + 10, y: y, width: half, height: 44)
     }
 }
+
+// MARK: - 収納・呼び寄せ
+
+/// 空間にあるモニターと家具の一覧。遠くにあるものも、ここから「しまう／出す」「ここへ呼ぶ」ができる。
+final class InventoryPanel: UIView {
+    struct Row {
+        let title: String
+        let detail: String
+        let stored: Bool
+        let onBring: () -> Void
+        let onToggle: () -> Void
+    }
+
+    var onClose: (() -> Void)?
+
+    private let glass = GlassView(cornerRadius: 24)
+    private let titleLabel = UILabel()
+    private let closeButton = UIButton(type: .system)
+    private let scroll = UIScrollView()
+    private let stack = UIStackView()
+    private var rows: [Row] = []
+    private var rowButtons: [UIButton] = []
+    private var rowLabels: [UILabel] = []
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        addSubview(glass)
+        titleLabel.text = "収納・呼び寄せ"
+        titleLabel.font = .systemFont(ofSize: 17, weight: .bold)
+        glass.contentView.addSubview(titleLabel)
+        closeButton.setTitle("閉じる", for: .normal)
+        closeButton.titleLabel?.font = .systemFont(ofSize: 15, weight: .semibold)
+        closeButton.layer.cornerRadius = 10
+        closeButton.layer.cornerCurve = .continuous
+        closeButton.addTarget(self, action: #selector(closeTapped), for: .touchUpInside)
+        glass.contentView.addSubview(closeButton)
+        scroll.alwaysBounceVertical = true
+        scroll.indicatorStyle = .white
+        glass.contentView.addSubview(scroll)
+        stack.axis = .vertical
+        stack.spacing = 8
+        scroll.addSubview(stack)
+        applyTheme()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) は使いません")
+    }
+
+    func reload(_ list: [Row]) {
+        rows = list
+        for v in stack.arrangedSubviews {
+            stack.removeArrangedSubview(v)
+            v.removeFromSuperview()
+        }
+        rowButtons = []
+        rowLabels = []
+        if list.isEmpty {
+            let empty = UILabel()
+            empty.text = "モニターも家具もありません。"
+            empty.font = .systemFont(ofSize: 15)
+            rowLabels.append(empty)
+            stack.addArrangedSubview(empty)
+        }
+        for (i, row) in list.enumerated() {
+            let line = UIStackView()
+            line.axis = .horizontal
+            line.spacing = 8
+            line.alignment = .center
+            let label = UILabel()
+            label.numberOfLines = 2
+            let text = NSMutableAttributedString(string: row.title,
+                                                 attributes: [.font: UIFont.systemFont(ofSize: 15, weight: .semibold)])
+            text.append(NSAttributedString(string: "\n" + row.detail,
+                                           attributes: [.font: UIFont.systemFont(ofSize: 12)]))
+            label.attributedText = text
+            label.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            rowLabels.append(label)
+            line.addArrangedSubview(label)
+            let bring = makeButton("ここへ", tag: i * 2)
+            let toggle = makeButton(row.stored ? "出す" : "しまう", tag: i * 2 + 1)
+            line.addArrangedSubview(bring)
+            line.addArrangedSubview(toggle)
+            line.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+            stack.addArrangedSubview(line)
+        }
+        applyTheme()
+        setNeedsLayout()
+    }
+
+    private func makeButton(_ title: String, tag: Int) -> UIButton {
+        let b = UIButton(type: .system)
+        b.setTitle(title, for: .normal)
+        b.titleLabel?.font = .systemFont(ofSize: 14, weight: .semibold)
+        b.layer.cornerRadius = 10
+        b.layer.cornerCurve = .continuous
+        b.tag = tag
+        b.addTarget(self, action: #selector(rowTapped(_:)), for: .touchUpInside)
+        b.widthAnchor.constraint(equalToConstant: 72).isActive = true
+        b.heightAnchor.constraint(equalToConstant: 36).isActive = true
+        rowButtons.append(b)
+        return b
+    }
+
+    @objc private func rowTapped(_ sender: UIButton) {
+        let i = sender.tag / 2
+        guard i >= 0 && i < rows.count else { return }
+        if sender.tag % 2 == 0 {
+            rows[i].onBring()
+        } else {
+            rows[i].onToggle()
+        }
+    }
+
+    @objc private func closeTapped() { onClose?() }
+
+    func applyTheme() {
+        let t = Palette.theme
+        glass.applyTheme()
+        titleLabel.textColor = t.ink
+        closeButton.backgroundColor = t.accent
+        closeButton.setTitleColor(t.accentInk, for: .normal)
+        for l in rowLabels {
+            l.textColor = t.ink
+        }
+        for b in rowButtons {
+            b.backgroundColor = UIColor(white: 1, alpha: 0.14)
+            b.setTitleColor(t.ink, for: .normal)
+        }
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        glass.frame = bounds
+        let x: CGFloat = 20
+        let w = bounds.width - 40
+        titleLabel.frame = CGRect(x: x, y: 18, width: w - 100, height: 36)
+        closeButton.frame = CGRect(x: x + w - 88, y: 18, width: 88, height: 36)
+        scroll.frame = CGRect(x: x, y: 66, width: w, height: max(0, bounds.height - 84))
+        let fit = stack.systemLayoutSizeFitting(
+            CGSize(width: w, height: UIView.layoutFittingCompressedSize.height),
+            withHorizontalFittingPriority: .required,
+            verticalFittingPriority: .fittingSizeLevel)
+        stack.frame = CGRect(x: 0, y: 0, width: w, height: fit.height)
+        scroll.contentSize = CGSize(width: w, height: fit.height)
+    }
+}

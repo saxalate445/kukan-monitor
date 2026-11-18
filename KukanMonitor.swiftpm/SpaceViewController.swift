@@ -139,6 +139,9 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
     private let levelKey = "kukan.level"
     private var floorButton: UIButton?
     private let lightPanel = LightPanel(frame: .zero)
+    private let inventoryPanel = InventoryPanel(frame: .zero)
+    private var radarTargets: [MonitorView] = []
+    private var multiPlayNotified = false
     private let lightKey = "kukan.light.v1"  // [R, G, B, 明るさ]
 
     // 設定
@@ -269,8 +272,8 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
         // レーダー：点をタップすると、そのモニターの方へ向く
         radar.isHidden = defaults.bool(forKey: radarKey)
         radar.onPick = { [weak self] index in
-            guard let self = self, index >= 0, index < self.monitors.count else { return }
-            self.turn(to: self.monitors[index])
+            guard let self = self, index >= 0, index < self.radarTargets.count else { return }
+            self.turn(to: self.radarTargets[index])
         }
         view.addSubview(radar)
 
@@ -309,6 +312,9 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
         buildLauncher()
         buildDesignLauncher()
         setupLightPanel()
+        inventoryPanel.isHidden = true
+        inventoryPanel.onClose = { [weak self] in self?.inventoryPanel.isHidden = true }
+        view.addSubview(inventoryPanel)
 
         // アプリ内キーボード
         inputPanel.isHidden = true
@@ -440,7 +446,9 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
         ]
         let monitorRow3: [UIButton] = [
             makeHUDButton("近くへ", primary: false, action: #selector(moveTargetNearer)),
-            makeHUDButton("遠くへ", primary: false, action: #selector(moveTargetFarther))
+            makeHUDButton("遠くへ", primary: false, action: #selector(moveTargetFarther)),
+            makeHUDButton("しまう", primary: false, action: #selector(storeTarget)),
+            makeHUDButton("収納・呼び寄せ", primary: false, action: #selector(openInventory))
         ]
 
         // 「デザイン」のページ
@@ -460,7 +468,7 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
         ]
         let furnitureB = makeHUDButton("3D表示：オン", primary: false, action: #selector(toggleFurniture))
         furnitureButton = furnitureB
-        let designRow3: [UIButton] = [furnitureB]
+        let designRow3: [UIButton] = [furnitureB, makeHUDButton("収納・呼び寄せ", primary: false, action: #selector(openInventory))]
 
         // 「ペン」のページ（Apple Pencil）
         let penColorB = makeHUDButton("色", primary: false, action: #selector(nextPenColor))
@@ -574,6 +582,7 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
         backLayer.strokeColor = t.ink.withAlphaComponent(0.6).cgColor
         backLayer.fillColor = t.ink.withAlphaComponent(0.06).cgColor
         lightPanel.applyTheme()
+        inventoryPanel.applyTheme()
         starLayer.fillColor = t.star.cgColor
         sunLayer.fillColor = (t.sun ?? UIColor.clear).cgColor
         helpLabel.textColor = t.ink.withAlphaComponent(0.78)
@@ -664,8 +673,42 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
     /// 音声フォーカスがオンなら、最後に見たモニター以外の音を消す
     private func applyAudioFocus() {
         let owner = focused ?? soundOwner
-        for mv in monitors {
-            mv.setMuted(audioFocus && owner != nil && mv !== owner)
+        for mv in monitors where audioFocus && owner != nil && mv !== owner {
+            mv.setMuted(true)
+        }
+        for mv in monitors where !(audioFocus && owner != nil && mv !== owner) {
+            mv.setMuted(false)
+        }
+        // 音を切り替えた瞬間に止められた画面があれば、再開させる
+        if audioFocus {
+            let others = monitors.filter { $0 !== owner && $0.playedRecently }
+            if !others.isEmpty {
+                Task {
+                    try? await Task.sleep(nanoseconds: 350_000_000)
+                    for mv in others {
+                        mv.resumeRecentMedia()
+                    }
+                }
+            }
+        }
+    }
+
+    /// どこかの画面で再生が始まった。ほかにも再生中の画面があれば、全部を再生し続けられるようにする。
+    /// iPad では音の出る動画は同時に1つまでなので、音は今始めた画面から出し、ほかは消音で続ける。
+    private func mediaStateChanged(_ mv: MonitorView, _ playing: Bool) {
+        guard playing else { return }
+        let others = monitors.filter { $0 !== mv && $0.playedRecently }
+        soundOwner = mv
+        guard !others.isEmpty else { return }
+        if !audioFocus {
+            audioFocus = true
+            UserDefaults.standard.set(true, forKey: audioKey)
+            updateSettingTitles()
+        }
+        applyAudioFocus()
+        if !multiPlayNotified {
+            multiPlayNotified = true
+            showToast("複数の画面で同時に再生中です。iPadでは音の出る動画は1つまでのため、最後に再生した（見ている）画面の音を出し、ほかは消音で再生を続けます。")
         }
     }
 
@@ -949,7 +992,7 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
     }
 
     private func applyArrangement() {
-        let list = monitors
+        let list = monitors.filter { !$0.stored }
         switch arrangement {
         case 1:
             // ウォール：上下2段の壁
@@ -1017,6 +1060,11 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
         designLauncher?.frame = b
         gridLayer2.frame = b
         backLayer.frame = b
+        if !inventoryPanel.isHidden {
+            let w = min(560, b.width - 32)
+            let h = min(560, b.height - view.safeAreaInsets.top - view.safeAreaInsets.bottom - 140)
+            inventoryPanel.frame = CGRect(x: (b.width - w) / 2, y: view.safeAreaInsets.top + 60, width: w, height: max(200, h))
+        }
         if !lightPanel.isHidden {
             let w = min(460, b.width - 32)
             lightPanel.frame = CGRect(x: (b.width - w) / 2, y: view.safeAreaInsets.top + 70,
@@ -1145,7 +1193,7 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
         let here = gazeHeading()
         var best: MonitorView?
         var bestDelta = Double.greatestFiniteMagnitude
-        for mv in monitors where mv !== gazed {
+        for mv in monitors where mv !== gazed && !mv.stored {
             var d = wrapAngle(heading(to: mv) - here) * sign
             if d <= 0.05 { d += 2 * Double.pi }
             if d < bestDelta {
@@ -1257,6 +1305,10 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
         // 裏から見ているモニターは、そこにあると分かるよう点線の枠だけ描く。
         let backPath = CGMutablePath()
         for mv in monitors where mv !== focused {
+            if mv.stored {
+                mv.alpha = 0
+                continue
+            }
             let front = facesCamera(mv)
             let poly = screenPolygon(mv)
             let visible = poly.map { polygonVisible($0) } ?? false
@@ -1318,7 +1370,9 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
         let fx = gazeDir.x / flat
         let fz = gazeDir.z / flat
         var blips: [RadarView.Blip] = []
-        for mv in monitors {
+        radarTargets = []
+        for mv in monitors where !mv.stored {
+            radarTargets.append(mv)
             let c = frame(of: mv).center - camPos
             let forward = c.x * fx + c.z * fz
             let right = c.z * fx - c.x * fz
@@ -1393,7 +1447,7 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
     private func monitor(alongRay d: Vec3) -> MonitorView? {
         var best: MonitorView?
         var bestT = Double.greatestFiniteMagnitude
-        for mv in monitors where mv !== focused {
+        for mv in monitors where mv !== focused && !mv.stored {
             let f = frame(of: mv)
             let k = d.dot(f.front)
             if k > -0.02 { continue }
@@ -1776,6 +1830,10 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
         mv.onChange = { [weak self] in self?.saveMonitors() }
         mv.onFillChanged = { [weak self] in self?.updateTheater() }
         mv.onMediaConflict = { [weak self] in self?.mediaConflict() }
+        mv.onMediaState = { [weak self, weak mv] playing in
+            guard let self = self, let mv = mv else { return }
+            self.mediaStateChanged(mv, playing)
+        }
         mv.onFillResult = { [weak self] state in
             if state == "on" {
                 self?.showToast("動画をモニターいっぱいに広げました。もう一度押すと戻ります。")
@@ -1829,6 +1887,7 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
                 mv.scale = min(4.0, max(0.5, s.scale ?? 1))
                 mv.radius = min(6000, max(300, s.radius ?? MonitorView.distance))
                 mv.turn = s.turn ?? 0
+                mv.stored = s.stored ?? false
                 mv.shape = min(MonitorView.shapes.count - 1, max(0, s.shape ?? 0))
                 mv.bounds = CGRect(origin: .zero, size: mv.spaceSize)
                 mv.place()
@@ -1840,7 +1899,7 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
         var list: [SavedMonitor] = []
         for mv in monitors {
             list.append(SavedMonitor(url: mv.currentURLString, yaw: mv.yaw, pitch: mv.pitch, scale: mv.scale, shape: mv.shape,
-                                     radius: mv.radius, turn: mv.turn))
+                                     radius: mv.radius, turn: mv.turn, stored: mv.stored))
         }
         if let data = try? JSONEncoder().encode(list) {
             UserDefaults.standard.set(data, forKey: saveKey)
@@ -2140,13 +2199,113 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
         view.addSubview(lightPanel)
     }
 
+    // MARK: 収納・呼び寄せ
+
+    /// 照準のモニター（なければ家具）をしまう
+    @objc private func storeTarget() {
+        if let mv = currentTarget {
+            setStored(mv, true)
+            showToast(mv.displayName + "をしまいました。「収納・呼び寄せ」から出せます。")
+        } else if let f = furnitureTarget {
+            space3D.setStored(f, true)
+            space3D.save()
+            showToast(f.name + "をしまいました。「収納・呼び寄せ」から出せます。")
+        } else {
+            showToast("しまいたいモニターや家具に、中央の照準を合わせてください。")
+        }
+    }
+
+    private func setStored(_ mv: MonitorView, _ on: Bool) {
+        if on {
+            if focused === mv { unfocus() }
+            if gazed === mv { gazed = nil }
+            if active === mv { active = nil }
+            mv.setPresentation(.spaceLocked)
+        } else {
+            mv.setPresentation(touchAll ? .spaceLive : .spaceLocked)
+        }
+        mv.stored = on
+        refreshHighlights()
+        saveMonitors()
+    }
+
+    /// 自分の前方（見ている向き）の点
+    private func pointAhead(_ distance: Double) -> Vec3 {
+        let flat = (gazeDir.x * gazeDir.x + gazeDir.z * gazeDir.z).squareRoot()
+        let fx = flat > 0.01 ? gazeDir.x / flat : 0
+        let fz = flat > 0.01 ? gazeDir.z / flat : -1
+        return Vec3(camPos.x + fx * distance, camPos.y, camPos.z + fz * distance)
+    }
+
+    private func distanceText(_ p: Vec3) -> String {
+        let d = p - camPos
+        let meters = d.dot(d).squareRoot() / 580
+        return String(format: "約%.1fm先", meters)
+    }
+
+    @objc private func openInventory() {
+        reloadInventory()
+        inventoryPanel.isHidden = false
+        view.bringSubviewToFront(inventoryPanel)
+        view.setNeedsLayout()
+    }
+
+    private func reloadInventory() {
+        var rows: [InventoryPanel.Row] = []
+        for mv in monitors {
+            let c = frame(of: mv).center
+            var detail = mv.stored ? "収納中" : distanceText(c)
+            if mv.mediaPlaying { detail += "・再生中" }
+            rows.append(InventoryPanel.Row(
+                title: "画面：" + mv.displayName, detail: detail, stored: mv.stored,
+                onBring: { [weak self, weak mv] in
+                    guard let self = self, let mv = mv else { return }
+                    // 目の高さで、前方に、こちら向きで置く
+                    self.placeMonitor(mv, at: self.pointAhead(MonitorView.distance), faceCamera: true)
+                    if mv.stored { self.setStored(mv, false) } else { self.saveMonitors() }
+                    self.reloadInventory()
+                },
+                onToggle: { [weak self, weak mv] in
+                    guard let self = self, let mv = mv else { return }
+                    self.setStored(mv, !mv.stored)
+                    self.reloadInventory()
+                }))
+        }
+        for f in space3D.items {
+            let pos = Vec3(f.x, 700 + levelY(f.level), f.z)
+            let floorName = f.level == 0 ? "1階" : "2階"
+            rows.append(InventoryPanel.Row(
+                title: "家具：" + f.name, detail: f.stored ? "収納中・" + floorName : distanceText(pos) + "・" + floorName,
+                stored: f.stored,
+                onBring: { [weak self, weak f] in
+                    guard let self = self, let f = f else { return }
+                    let p = self.pointAhead(1100)
+                    f.x = p.x
+                    f.z = p.z
+                    f.level = self.level
+                    f.rotation = atan2(p.x - self.camPos.x, p.z - self.camPos.z)
+                    if !self.furnitureOn { self.setFurnitureOn(true) }
+                    self.space3D.setStored(f, false)
+                    self.space3D.save()
+                    self.reloadInventory()
+                },
+                onToggle: { [weak self, weak f] in
+                    guard let self = self, let f = f else { return }
+                    self.space3D.setStored(f, !f.stored)
+                    self.space3D.save()
+                    self.reloadInventory()
+                }))
+        }
+        inventoryPanel.reload(rows)
+    }
+
     // MARK: ペン（Apple Pencil）
 
     /// メニューやボタンなどの上では書かない
     private func penBlocked(at p: CGPoint) -> Bool {
         guard var v = view.hitTest(p, with: nil) else { return false }
         let blockers: [UIView?] = [menuPanel, menuGlass, menuButton, inputPanel, launcher, designLauncher,
-                                   radar, walkStick, lookStick, lightPanel]
+                                   radar, walkStick, lookStick, lightPanel, inventoryPanel]
         while true {
             if v is UIControl { return true }
             if blockers.contains(where: { $0 === v }) { return true }
