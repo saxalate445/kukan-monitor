@@ -15,6 +15,7 @@ struct SavedFurniture: Codable {
     var rotation: Double
     var scale: Double
     var color: Int
+    var level: Int?      // 何階に置いたか（0 = 1階）
 }
 
 /// 空間に置いた家具1つ
@@ -26,8 +27,9 @@ final class FurnitureItem {
     var rotation: Double      // 上から見た向き（ラジアン）。0 で正面（奥）を向く
     var scale: Double
     var color: Int
+    var level: Int        // 0 = 1階, 1 = 2階
 
-    init(kind: String, node: SCNNode, x: Double, z: Double, rotation: Double, scale: Double, color: Int) {
+    init(kind: String, node: SCNNode, x: Double, z: Double, rotation: Double, scale: Double, color: Int, level: Int = 0) {
         self.kind = kind
         self.node = node
         self.x = x
@@ -35,6 +37,7 @@ final class FurnitureItem {
         self.rotation = rotation
         self.scale = scale
         self.color = color
+        self.level = level
     }
 
     var name: String { FurnitureFactory.name(of: kind) }
@@ -44,6 +47,13 @@ final class FurnitureItem {
 
 enum FurnitureFactory {
     static let floorY: Float = -700
+    /// 1つ上の階までの高さ（約2.6m）
+    static let levelHeight: Float = 1500
+
+    /// その階の床の高さ（SceneKit の y）
+    static func floorY(level: Int) -> Float {
+        floorY + Float(level) * levelHeight
+    }
     private static let k: CGFloat = 580   // 1m
 
     static let catalog: [(id: String, name: String)] = [
@@ -325,6 +335,9 @@ final class SpaceScene {
     private let saveKey = "kukan.furniture.v1"
     /// Apple Pencil で空中に描いた線（Pen.swift）
     let airRoot = SCNNode()
+    /// 照明の色（nil ならテーマの色）と明るさ
+    var customLight: UIColor?
+    var lightLevel: Double = 1
     var airStrokes: [AirStroke] = []
 
     /// 照準が乗っている家具（足元に輪を出す）
@@ -386,6 +399,16 @@ final class SpaceScene {
         let floorNode = SCNNode(geometry: floor)
         floorNode.position = SCNVector3(0, FurnitureFactory.floorY, 0)
         scene.rootNode.addChildNode(floorNode)
+        // 2階の床（ガラス張り）にも影を落とす
+        let upper = SCNPlane(width: 12000, height: 12000)
+        let upperMaterial = SCNMaterial()
+        upperMaterial.lightingModel = .shadowOnly
+        upperMaterial.isDoubleSided = true
+        upper.firstMaterial = upperMaterial
+        let upperNode = SCNNode(geometry: upper)
+        upperNode.eulerAngles = SCNVector3(-Float.pi / 2, 0, 0)
+        upperNode.position = SCNVector3(0, FurnitureFactory.floorY(level: 1), 0)
+        scene.rootNode.addChildNode(upperNode)
 
         scene.rootNode.addChildNode(furnitureRoot)
         scene.rootNode.addChildNode(airRoot)
@@ -424,8 +447,16 @@ final class SpaceScene {
 
     func applyTheme() {
         let t = Palette.theme
-        ambient.color = FurnitureFactory.blend(t.bottom, UIColor.white, 0.55)
-        sun.color = FurnitureFactory.blend(t.top, UIColor.white, 0.8)
+        if let c = customLight {
+            // 自分で選んだ照明の色
+            ambient.color = FurnitureFactory.blend(c, UIColor.white, 0.35)
+            sun.color = c
+        } else {
+            ambient.color = FurnitureFactory.blend(t.bottom, UIColor.white, 0.55)
+            sun.color = FurnitureFactory.blend(t.top, UIColor.white, 0.8)
+        }
+        ambient.intensity = CGFloat(420 * lightLevel)
+        sun.intensity = CGFloat(850 * lightLevel)
         ring.geometry?.firstMaterial?.diffuse.contents = t.accent
     }
 
@@ -438,9 +469,9 @@ final class SpaceScene {
     // MARK: 家具の出し入れ
 
     @discardableResult
-    func add(kind: String, x: Double, z: Double, rotation: Double, scale: Double, color: Int) -> FurnitureItem {
+    func add(kind: String, x: Double, z: Double, rotation: Double, scale: Double, color: Int, level: Int = 0) -> FurnitureItem {
         let node = FurnitureFactory.make(kind: kind)
-        let item = FurnitureItem(kind: kind, node: node, x: x, z: z, rotation: rotation, scale: scale, color: color)
+        let item = FurnitureItem(kind: kind, node: node, x: x, z: z, rotation: rotation, scale: scale, color: color, level: level)
         FurnitureFactory.applyColor(node, index: color)
         furnitureRoot.addChildNode(node)
         items.append(item)
@@ -466,7 +497,7 @@ final class SpaceScene {
 
     /// 位置・向き・大きさを3Dの形に反映する
     func update(_ item: FurnitureItem) {
-        item.node.position = SCNVector3(Float(item.x), FurnitureFactory.floorY, Float(item.z))
+        item.node.position = SCNVector3(Float(item.x), FurnitureFactory.floorY(level: item.level), Float(item.z))
         item.node.eulerAngles = SCNVector3(0, Float(item.rotation), 0)
         let s = Float(item.scale)
         item.node.scale = SCNVector3(s, s, s)
@@ -487,7 +518,7 @@ final class SpaceScene {
         let half = max(abs(Double(minB.x)), abs(Double(maxB.x)), abs(Double(minB.z)), abs(Double(maxB.z)))
         torus.ringRadius = CGFloat(max(120, half * item.scale * 1.08))
         torus.pipeRadius = grabbed != nil ? 12 : 6
-        ring.position = SCNVector3(Float(item.x), FurnitureFactory.floorY + 4, Float(item.z))
+        ring.position = SCNVector3(Float(item.x), FurnitureFactory.floorY(level: item.level) + 4, Float(item.z))
         ring.isHidden = false
     }
 
@@ -518,7 +549,7 @@ final class SpaceScene {
         var list: [SavedFurniture] = []
         for item in items {
             list.append(SavedFurniture(kind: item.kind, x: item.x, z: item.z, rotation: item.rotation,
-                                       scale: item.scale, color: item.color))
+                                       scale: item.scale, color: item.color, level: item.level))
         }
         if let data = try? JSONEncoder().encode(list) {
             UserDefaults.standard.set(data, forKey: saveKey)
@@ -532,7 +563,8 @@ final class SpaceScene {
             return false
         }
         for f in list.prefix(60) {
-            add(kind: f.kind, x: f.x, z: f.z, rotation: f.rotation, scale: min(3, max(0.4, f.scale)), color: f.color)
+            add(kind: f.kind, x: f.x, z: f.z, rotation: f.rotation, scale: min(3, max(0.4, f.scale)), color: f.color,
+                level: min(1, max(0, f.level ?? 0)))
         }
         return true
     }

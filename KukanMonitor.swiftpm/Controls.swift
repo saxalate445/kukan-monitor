@@ -739,3 +739,154 @@ final class InputPanel: UIView, UITextFieldDelegate {
         return true
     }
 }
+
+// MARK: - 照明の色（RGB）
+
+/// 家具や空中の線を照らす光の色を、R・G・B と明るさのスライダーで選ぶパネル
+final class LightPanel: UIView {
+    var onChange: ((UIColor, Double) -> Void)?
+    var onReset: (() -> Void)?
+    var onClose: (() -> Void)?
+
+    private let glass = GlassView(cornerRadius: 24)
+    private let titleLabel = UILabel()
+    private let swatch = UIView()
+    private let hexLabel = UILabel()
+    private var sliders: [UISlider] = []
+    private var nameLabels: [UILabel] = []
+    private var valueLabels: [UILabel] = []
+    private let resetButton = UIButton(type: .system)
+    private let closeButton = UIButton(type: .system)
+    private static let names = ["R（赤）", "G（緑）", "B（青）", "明るさ"]
+    private static let rowHeight: CGFloat = 40
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        addSubview(glass)
+        titleLabel.text = "照明の色"
+        titleLabel.font = .systemFont(ofSize: 17, weight: .bold)
+        glass.contentView.addSubview(titleLabel)
+        swatch.layer.cornerRadius = 12
+        swatch.layer.cornerCurve = .continuous
+        swatch.layer.borderWidth = 1
+        swatch.layer.borderColor = UIColor(white: 1, alpha: 0.4).cgColor
+        glass.contentView.addSubview(swatch)
+        hexLabel.font = .monospacedDigitSystemFont(ofSize: 15, weight: .semibold)
+        glass.contentView.addSubview(hexLabel)
+        for (i, name) in LightPanel.names.enumerated() {
+            let n = UILabel()
+            n.text = name
+            n.font = .systemFont(ofSize: 14, weight: .medium)
+            glass.contentView.addSubview(n)
+            nameLabels.append(n)
+            let s = UISlider()
+            if i < 3 {
+                s.minimumValue = 0
+                s.maximumValue = 255
+            } else {
+                s.minimumValue = 0.2
+                s.maximumValue = 2
+            }
+            s.addTarget(self, action: #selector(changed), for: .valueChanged)
+            glass.contentView.addSubview(s)
+            sliders.append(s)
+            let v = UILabel()
+            v.font = .monospacedDigitSystemFont(ofSize: 14, weight: .regular)
+            v.textAlignment = .right
+            glass.contentView.addSubview(v)
+            valueLabels.append(v)
+        }
+        sliders[0].minimumTrackTintColor = UIColor(red: 1, green: 0.35, blue: 0.35, alpha: 1)
+        sliders[1].minimumTrackTintColor = UIColor(red: 0.35, green: 0.9, blue: 0.45, alpha: 1)
+        sliders[2].minimumTrackTintColor = UIColor(red: 0.4, green: 0.6, blue: 1, alpha: 1)
+        for (b, title, action) in [(resetButton, "テーマの色に戻す", #selector(resetTapped)),
+                                   (closeButton, "閉じる", #selector(closeTapped))] {
+            b.setTitle(title, for: .normal)
+            b.titleLabel?.font = .systemFont(ofSize: 15, weight: .semibold)
+            b.layer.cornerRadius = 10
+            b.layer.cornerCurve = .continuous
+            b.addTarget(self, action: action, for: .touchUpInside)
+            glass.contentView.addSubview(b)
+        }
+        applyTheme()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) は使いません")
+    }
+
+    /// いまの色と明るさをスライダーに映す
+    func set(color: UIColor, level: Double) {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        _ = color.getRed(&r, green: &g, blue: &b, alpha: &a)
+        sliders[0].value = Float(r * 255)
+        sliders[1].value = Float(g * 255)
+        sliders[2].value = Float(b * 255)
+        sliders[3].value = Float(level)
+        refreshLabels()
+    }
+
+    private var currentColor: UIColor {
+        UIColor(red: CGFloat(sliders[0].value.rounded()) / 255, green: CGFloat(sliders[1].value.rounded()) / 255,
+                blue: CGFloat(sliders[2].value.rounded()) / 255, alpha: 1)
+    }
+
+    private func refreshLabels() {
+        for i in 0 ..< 3 {
+            valueLabels[i].text = String(Int(sliders[i].value.rounded()))
+        }
+        valueLabels[3].text = String(format: "%.1f", sliders[3].value)
+        swatch.backgroundColor = currentColor
+        hexLabel.text = String(format: "#%02X%02X%02X", Int(sliders[0].value.rounded()),
+                               Int(sliders[1].value.rounded()), Int(sliders[2].value.rounded()))
+    }
+
+    @objc private func changed() {
+        refreshLabels()
+        onChange?(currentColor, Double(sliders[3].value))
+    }
+
+    @objc private func resetTapped() { onReset?() }
+    @objc private func closeTapped() { onClose?() }
+
+    func applyTheme() {
+        let t = Palette.theme
+        glass.applyTheme()
+        titleLabel.textColor = t.ink
+        hexLabel.textColor = t.ink
+        for l in nameLabels + valueLabels {
+            l.textColor = t.ink.withAlphaComponent(0.85)
+        }
+        sliders[3].minimumTrackTintColor = t.accent
+        resetButton.backgroundColor = UIColor(white: 1, alpha: 0.14)
+        resetButton.setTitleColor(t.ink, for: .normal)
+        closeButton.backgroundColor = t.accent
+        closeButton.setTitleColor(t.accentInk, for: .normal)
+    }
+
+    var preferredHeight: CGFloat {
+        20 + 34 + 12 + CGFloat(sliders.count) * LightPanel.rowHeight + 14 + 44 + 20
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        glass.frame = bounds
+        let x: CGFloat = 20
+        let w = bounds.width - 40
+        titleLabel.frame = CGRect(x: x, y: 20, width: w - 140, height: 34)
+        swatch.frame = CGRect(x: x + w - 34, y: 20, width: 34, height: 34)
+        hexLabel.frame = CGRect(x: x + w - 34 - 96, y: 20, width: 88, height: 34)
+        hexLabel.textAlignment = .right
+        var y: CGFloat = 20 + 34 + 12
+        for i in 0 ..< sliders.count {
+            nameLabels[i].frame = CGRect(x: x, y: y, width: 70, height: LightPanel.rowHeight)
+            valueLabels[i].frame = CGRect(x: x + w - 44, y: y, width: 44, height: LightPanel.rowHeight)
+            sliders[i].frame = CGRect(x: x + 78, y: y, width: max(0, w - 78 - 52), height: LightPanel.rowHeight)
+            y += LightPanel.rowHeight
+        }
+        y += 14
+        let half = (w - 10) / 2
+        resetButton.frame = CGRect(x: x, y: y, width: half, height: 44)
+        closeButton.frame = CGRect(x: x + half + 10, y: y, width: half, height: 44)
+    }
+}

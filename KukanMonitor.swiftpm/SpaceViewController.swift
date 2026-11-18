@@ -14,6 +14,8 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
     private let backdrop = CAGradientLayer()
     private let sunLayer = CAShapeLayer()
     private let gridLayer = CAShapeLayer()
+    private let gridLayer2 = CAShapeLayer()       // もう1つの階の床（透けて見える）
+    private let backLayer = CAShapeLayer()        // 裏から見たモニターの枠
     private let starLayer = CAShapeLayer()
     private let theaterDim = CALayer()
     private var stars: [Vec3] = []
@@ -132,7 +134,12 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
     private var perspective = 500.0
     private var gazeDir = Vec3(0, 0, -1)
     private var camPos = Vec3(0, 0, 0)       // 空間内での自分の位置
-    private let walkLimit = 3200.0           // 中心から動ける距離
+    private let roomHalf = 5800.0            // 歩ける範囲（見えている床の端まで）
+    private var level = 0                    // 0 = 1階, 1 = 2階
+    private let levelKey = "kukan.level"
+    private var floorButton: UIButton?
+    private let lightPanel = LightPanel(frame: .zero)
+    private let lightKey = "kukan.light.v1"  // [R, G, B, 明るさ]
 
     // 設定
     private var touchMode = 0                // 0: 最大化して操作, 1: 空間で直接（照準の1枚）, 2: 空間で直接（すべて）
@@ -190,6 +197,13 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
         }
         audioFocus = defaults.bool(forKey: audioKey)
         penColor = PenPalette.index(defaults.integer(forKey: penColorKey))
+        level = min(1, max(0, defaults.integer(forKey: levelKey)))
+        camPos = Vec3(0, levelY(level), 0)
+        if let light = defaults.array(forKey: lightKey) as? [Double], light.count == 4 {
+            space3D.customLight = UIColor(red: CGFloat(light[0]) / 255, green: CGFloat(light[1]) / 255,
+                                          blue: CGFloat(light[2]) / 255, alpha: 1)
+            space3D.lightLevel = light[3]
+        }
         if defaults.object(forKey: penWidthKey) != nil {
             penWidth = min(2, max(0, defaults.integer(forKey: penWidthKey)))
         }
@@ -209,8 +223,15 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
         theaterDim.opacity = 0
         sceneryView.isUserInteractionEnabled = false
         sceneryView.layer.addSublayer(sunLayer)
+        sceneryView.layer.addSublayer(gridLayer2)
         sceneryView.layer.addSublayer(gridLayer)
+        gridLayer2.fillColor = nil
+        gridLayer2.lineWidth = 1
+        gridLayer2.opacity = 0.3
         sceneryView.layer.addSublayer(starLayer)
+        backLayer.lineWidth = 1.5
+        backLayer.lineDashPattern = [10, 6]
+        sceneryView.layer.addSublayer(backLayer)
         sceneryView.layer.addSublayer(theaterDim)
         view.addSubview(sceneryView)
 
@@ -265,9 +286,10 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
         // 丸いメニューボタン：タップでメニューの表示/非表示、ドラッグで移動。
         menuButton.setImage(UIImage(systemName: "line.3.horizontal"), for: .normal)
         menuButton.bounds = CGRect(x: 0, y: 0, width: 58, height: 58)
+        // ガラスはボタンの後ろに別に置く（ボタンの中に入れるとアイコンが隠れるため）
         menuButtonGlass.isUserInteractionEnabled = false
-        menuButtonGlass.frame = menuButton.bounds
-        menuButton.insertSubview(menuButtonGlass, at: 0)
+        menuButtonGlass.bounds = menuButton.bounds
+        view.addSubview(menuButtonGlass)
         menuButton.addTarget(self, action: #selector(toggleMenu), for: .touchUpInside)
         menuButton.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(moveMenuButton(_:))))
         view.addSubview(menuButton)
@@ -286,6 +308,7 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
 
         buildLauncher()
         buildDesignLauncher()
+        setupLightPanel()
 
         // アプリ内キーボード
         inputPanel.isHidden = true
@@ -471,6 +494,9 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
         audioButton = audio
         let spaceRow1: [UIButton] = [theme, ar, makeHUDButton("視点リセット", primary: false, action: #selector(recenter))]
         let spaceRow2: [UIButton] = [radarB, audio]
+        let floorB = makeHUDButton("2階へ上がる", primary: false, action: #selector(toggleFloor))
+        floorButton = floorB
+        let spaceRow3: [UIButton] = [floorB, makeHUDButton("照明の色", primary: false, action: #selector(openLightPanel))]
 
         // 「操作」のページ
         let touchB = makeHUDButton("画面操作：最大化", primary: false, action: #selector(toggleTouchMode))
@@ -486,7 +512,7 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
             makePage([monitorRow1, monitorRow2, monitorRow3]),
             makePage([designRow1, designRow2, designRow3]),
             makePage([penRow1, penRow2]),
-            makePage([spaceRow1, spaceRow2]),
+            makePage([spaceRow1, spaceRow2, spaceRow3]),
             makePage([controlRow1, controlRow2])
         ]
 
@@ -529,6 +555,7 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
         setTitle(arrangeButton, "並べ方：" + arrangementNames[arrangement])
         setTitle(arButton, arOn ? "VRに戻す" : "ARに切り替え")
         setTitle(themeButton, "空間：" + Palette.theme.name)
+        setTitle(floorButton, level == 0 ? "2階へ上がる" : "1階へ下りる")
         let helps = [
             "照準をモニターに合わせる ／ どこでもタップ：開く ／ 長押し：移動 ／ ピンチ：大きさ変更",
             "照準を合わせたモニター（色付きの枠）だけタッチ操作できる ／ 枠の外を長押し：移動 ／ 枠の外でピンチ：大きさ変更",
@@ -543,6 +570,10 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
         let t = Palette.theme
         backdrop.colors = [t.top.cgColor, t.bottom.cgColor]
         gridLayer.strokeColor = t.grid.cgColor
+        gridLayer2.strokeColor = t.grid.cgColor
+        backLayer.strokeColor = t.ink.withAlphaComponent(0.6).cgColor
+        backLayer.fillColor = t.ink.withAlphaComponent(0.06).cgColor
+        lightPanel.applyTheme()
         starLayer.fillColor = t.star.cgColor
         sunLayer.fillColor = (t.sun ?? UIColor.clear).cgColor
         helpLabel.textColor = t.ink.withAlphaComponent(0.78)
@@ -674,6 +705,7 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
         let d = g.translation(in: view)
         g.setTranslation(.zero, in: view)
         menuButton.center = clamped(CGPoint(x: menuButton.center.x + d.x, y: menuButton.center.y + d.y), half: 29)
+        menuButtonGlass.center = menuButton.center
         menuAnchor = anchor(for: menuButton.center)
     }
 
@@ -982,6 +1014,14 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
         touchView.frame = b
         focusDim.frame = b
         launcher?.frame = b
+        designLauncher?.frame = b
+        gridLayer2.frame = b
+        backLayer.frame = b
+        if !lightPanel.isHidden {
+            let w = min(460, b.width - 32)
+            lightPanel.frame = CGRect(x: (b.width - w) / 2, y: view.safeAreaInsets.top + 70,
+                                      width: w, height: lightPanel.preferredHeight)
+        }
         reticle.bounds = CGRect(x: 0, y: 0, width: 26, height: 26)
         reticle.center = CGPoint(x: b.midX, y: b.midY)
 
@@ -1000,6 +1040,7 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
         if !walkMoved { walkAnchor.dy = defaultDY }
         if !lookMoved { lookAnchor.dy = defaultDY }
         menuButton.center = clamped(point(for: menuAnchor), half: 29)
+        menuButtonGlass.center = menuButton.center
         walkStick.center = clamped(point(for: walkAnchor), half: 60)
         lookStick.center = clamped(point(for: lookAnchor), half: 60)
         radar.frame = CGRect(x: b.width - safe.right - 16 - 108, y: safe.top + 16, width: 108, height: 108)
@@ -1124,7 +1165,7 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
         }
         pitchOffset = 0
         turnRemaining = 0
-        camPos = Vec3(0, 0, 0)
+        camPos = Vec3(0, levelY(level), 0)
     }
 
     // MARK: 毎フレームの更新
@@ -1155,12 +1196,18 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
                 let r = Vec3(-f.z, 0, f.x)
                 let step = 700.0 * dt
                 var p = camPos + f * (-Double(walk.y) * step) + r * (Double(walk.x) * step)
-                let dist = (p.x * p.x + p.z * p.z).squareRoot()
-                if dist > walkLimit {
-                    p = Vec3(p.x * walkLimit / dist, 0, p.z * walkLimit / dist)
-                }
+                // 見えている床の端まで歩ける（高さはそのまま）
+                p = Vec3(min(roomHalf, max(-roomHalf, p.x)), p.y, min(roomHalf, max(-roomHalf, p.z)))
                 camPos = p
             }
+        }
+
+        // 階の移動：目の高さを、なめらかに上げ下げする
+        let targetY = levelY(level)
+        if abs(camPos.y - targetY) > 0.5 {
+            camPos.y += (targetY - camPos.y) * min(1, dt * 4)
+        } else {
+            camPos.y = targetY
         }
 
         // 「左/右のモニターへ」やレーダーで指定された向きへ、少しずつ回す
@@ -1205,11 +1252,21 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
             // つかんだ距離のまま視線の先へ動かし、こちらを向ける
             placeMonitor(g, at: camPos + gazeDir * grabDistance, faceCamera: true)
         }
+        // 視点の後ろ側や、裏から見ているモニターは描かない。
+        // 非表示（isHidden）にするとページが「見えていない」扱いになり動画が止まるため、透明にする。
+        // 裏から見ているモニターは、そこにあると分かるよう点線の枠だけ描く。
+        let backPath = CGMutablePath()
         for mv in monitors where mv !== focused {
-            // 視点の後ろ側に回ったモニターは描かない。
-            // 非表示（isHidden）にするとページが「見えていない」扱いになり動画が止まるため、透明にする。
-            mv.alpha = isOnScreen(mv) ? 1 : 0
+            let front = facesCamera(mv)
+            let poly = screenPolygon(mv)
+            let visible = poly.map { polygonVisible($0) } ?? false
+            mv.alpha = (front && visible) ? 1 : 0
+            if !front, visible, let q = poly {
+                backPath.addLines(between: q)
+                backPath.closeSubpath()
+            }
         }
+        backLayer.path = backPath
         if focused == nil && grabbed == nil && space3D.grabbed == nil {
             let hit = monitor(alongRay: gazeDir)
             if hit !== gazed {
@@ -1246,6 +1303,7 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
             }
             f.x = x
             f.z = z
+            f.level = level
             space3D.update(f)
         }
         drawScenery()
@@ -1313,7 +1371,7 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
 
     /// 視線が床に当たる場所（床が見えない向きなら、前方の床）
     private func floorPoint(alongRay d: Vec3) -> (x: Double, z: Double)? {
-        let floorY = 700.0
+        let floorY = 700.0 + levelY(level)
         if d.y > 0.05 {
             let t = min(3000, (floorY - camPos.y) / d.y)
             let p = camPos + d * t
@@ -1352,17 +1410,21 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
         return best
     }
 
-    /// モニターが画面に少しでも映るか。裏側にいるときや、視点の後ろだけにあるときは false。
-    private func isOnScreen(_ mv: MonitorView) -> Bool {
+    /// モニターの表側から見ているか
+    private func facesCamera(_ mv: MonitorView) -> Bool {
         let f = frame(of: mv)
-        if (camPos - f.center).dot(f.front) <= 0 { return false }
+        return (camPos - f.center).dot(f.front) > 0
+    }
+
+    /// モニターの四隅を画面に写した形（視点より前にある部分だけ）。まったく前にないなら nil
+    private func screenPolygon(_ mv: MonitorView) -> [CGPoint]? {
+        let f = frame(of: mv)
         let hw = Double(mv.spaceSize.width) / 2 * mv.scale
         let hh = Double(mv.spaceSize.height) / 2 * mv.scale
         let signs: [(Double, Double)] = [(-1, -1), (1, -1), (1, 1), (-1, 1)]
         let pts = signs.map { s in
             viewMatrix.apply(f.center + f.right * (s.0 * hw) + f.down * (s.1 * hh) - camPos)
         }
-        // 視点より前にある部分だけを切り出す
         let near = -30.0
         var poly: [Vec3] = []
         for i in 0..<4 {
@@ -1374,20 +1436,31 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
                 poly.append(p + (q - p) * t)
             }
         }
-        if poly.isEmpty { return false }
+        if poly.isEmpty { return nil }
         let bounds = view.bounds
         let cx = Double(bounds.midX), cy = Double(bounds.midY)
-        var minX = Double.greatestFiniteMagnitude, maxX = -Double.greatestFiniteMagnitude
-        var minY = Double.greatestFiniteMagnitude, maxY = -Double.greatestFiniteMagnitude
-        for c in poly {
-            let x = cx + perspective * c.x / (-c.z)
-            let y = cy + perspective * c.y / (-c.z)
-            minX = min(minX, x); maxX = max(maxX, x)
-            minY = min(minY, y); maxY = max(maxY, y)
+        return poly.map { c in
+            CGPoint(x: cx + perspective * c.x / (-c.z), y: cy + perspective * c.y / (-c.z))
         }
-        let margin = 40.0
-        return maxX >= -margin && minX <= Double(bounds.width) + margin
-            && maxY >= -margin && minY <= Double(bounds.height) + margin
+    }
+
+    /// 写した形が、画面に少しでもかかるか
+    private func polygonVisible(_ poly: [CGPoint]) -> Bool {
+        let bounds = view.bounds
+        var minX = CGFloat.greatestFiniteMagnitude, maxX = -CGFloat.greatestFiniteMagnitude
+        var minY = CGFloat.greatestFiniteMagnitude, maxY = -CGFloat.greatestFiniteMagnitude
+        for p in poly {
+            minX = min(minX, p.x); maxX = max(maxX, p.x)
+            minY = min(minY, p.y); maxY = max(maxY, p.y)
+        }
+        let margin: CGFloat = 40
+        return maxX >= -margin && minX <= bounds.width + margin && maxY >= -margin && minY <= bounds.height + margin
+    }
+
+    /// モニターが画面に少しでも映るか。裏側にいるときや、視点の後ろだけにあるときは false。
+    private func isOnScreen(_ mv: MonitorView) -> Bool {
+        guard facesCamera(mv), let poly = screenPolygon(mv) else { return false }
+        return polygonVisible(poly)
     }
 
     // MARK: 背景（床の格子・星・太陽）
@@ -1408,6 +1481,7 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
     private func drawScenery() {
         if arOn {
             gridLayer.path = nil
+            gridLayer2.path = nil
             starLayer.path = nil
             sunLayer.path = nil
             return
@@ -1421,8 +1495,7 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
         func proj(_ c: Vec3) -> CGPoint {
             CGPoint(x: cx + P * c.x / (-c.z), y: cy + P * c.y / (-c.z))
         }
-        let grid = CGMutablePath()
-        func line(_ p0: Vec3, _ p1: Vec3) {
+        func line(_ path: CGMutablePath, _ p0: Vec3, _ p1: Vec3) {
             var a = V.apply(p0 - camPos)
             var c = V.apply(p1 - camPos)
             if a.z > near && c.z > near { return }
@@ -1433,17 +1506,22 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
                 let t = (near - a.z) / (c.z - a.z)
                 c = a + (c - a) * t
             }
-            grid.move(to: proj(a))
-            grid.addLine(to: proj(c))
+            path.move(to: proj(a))
+            path.addLine(to: proj(c))
         }
-        let floorY = 700.0
-        var k = -6000.0
-        while k <= 6000.0 {
-            line(Vec3(k, floorY, -6000), Vec3(k, floorY, 6000))
-            line(Vec3(-6000, floorY, k), Vec3(6000, floorY, k))
-            k += 400
+        func floorGrid(_ y: Double) -> CGMutablePath {
+            let path = CGMutablePath()
+            var k = -6000.0
+            while k <= 6000.0 {
+                line(path, Vec3(k, y, -6000), Vec3(k, y, 6000))
+                line(path, Vec3(-6000, y, k), Vec3(6000, y, k))
+                k += 400
+            }
+            return path
         }
-        gridLayer.path = grid
+        // いる階の床をはっきり、もう1つの階の床を薄く（ガラス張りのように透けて見える）
+        gridLayer.path = floorGrid(700 + levelY(level))
+        gridLayer2.path = floorGrid(700 + levelY(1 - level))
 
         // 太陽（あるテーマだけ）：正面の地平線の少し上
         var sunPath: CGPath?
@@ -1871,7 +1949,7 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
             }
         }
         let item = space3D.add(kind: kind, x: x, z: z, rotation: atan2(x - camPos.x, z - camPos.z),
-                               scale: 1, color: FurnitureFactory.defaultColor(of: kind))
+                               scale: 1, color: FurnitureFactory.defaultColor(of: kind), level: level)
         space3D.save()
         space3D.hovered = item
         showToast(item.name + "を置きました。照準を合わせて長押しで移動、2本指でひねって回転、ピンチで大きさを変えられます。")
@@ -2010,13 +2088,65 @@ final class SpaceViewController: UIViewController, UIGestureRecognizerDelegate, 
         showToast("iPadの制限で、音の出る動画は同時に1つまでのようです。音声フォーカスをオンにしました（見ているモニターの音が出て、ほかは消音で再生を続けます）。")
     }
 
+    // MARK: 階と照明
+
+    /// その階にいるときの目の高さ（空間の y は下向きなので、上の階ほどマイナス）
+    private func levelY(_ l: Int) -> Double {
+        -Double(l) * Double(FurnitureFactory.levelHeight)
+    }
+
+    @objc private func toggleFloor() {
+        level = level == 0 ? 1 : 0
+        UserDefaults.standard.set(level, forKey: levelKey)
+        space3D.hovered = nil
+        updateSettingTitles()
+        showToast(level == 1 ? "2階に上がりました。床はガラス張りで、1階が透けて見えます。家具はいる階の床に置かれます。"
+                             : "1階に下りました。")
+    }
+
+    @objc private func openLightPanel() {
+        let t = Palette.theme
+        let color = space3D.customLight ?? FurnitureFactory.blend(t.top, UIColor.white, 0.8)
+        lightPanel.set(color: color, level: space3D.lightLevel)
+        lightPanel.isHidden = false
+        view.bringSubviewToFront(lightPanel)
+        view.setNeedsLayout()
+    }
+
+    private func setupLightPanel() {
+        lightPanel.isHidden = true
+        lightPanel.onChange = { [weak self] color, level in
+            guard let self = self else { return }
+            self.space3D.customLight = color
+            self.space3D.lightLevel = level
+            self.space3D.applyTheme()
+            var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+            _ = color.getRed(&r, green: &g, blue: &b, alpha: &a)
+            UserDefaults.standard.set([Double(r * 255), Double(g * 255), Double(b * 255), level], forKey: self.lightKey)
+        }
+        lightPanel.onReset = { [weak self] in
+            guard let self = self else { return }
+            self.space3D.customLight = nil
+            self.space3D.lightLevel = 1
+            self.space3D.applyTheme()
+            UserDefaults.standard.removeObject(forKey: self.lightKey)
+            let t = Palette.theme
+            self.lightPanel.set(color: FurnitureFactory.blend(t.top, UIColor.white, 0.8), level: 1)
+            self.showToast("照明をテーマの色に戻しました。")
+        }
+        lightPanel.onClose = { [weak self] in
+            self?.lightPanel.isHidden = true
+        }
+        view.addSubview(lightPanel)
+    }
+
     // MARK: ペン（Apple Pencil）
 
     /// メニューやボタンなどの上では書かない
     private func penBlocked(at p: CGPoint) -> Bool {
         guard var v = view.hitTest(p, with: nil) else { return false }
         let blockers: [UIView?] = [menuPanel, menuGlass, menuButton, inputPanel, launcher, designLauncher,
-                                   radar, walkStick, lookStick]
+                                   radar, walkStick, lookStick, lightPanel]
         while true {
             if v is UIControl { return true }
             if blockers.contains(where: { $0 === v }) { return true }
